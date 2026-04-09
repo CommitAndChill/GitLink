@@ -29,4 +29,9 @@ namespace gitlink::op
 
 	// --- Commits ---
 	GITLINKCORE_API auto CreateCommit(FRepository& InRepo, const FCommitParams& InParams) -> FResult;
+
+	// --- History / refs / remotes ---
+	GITLINKCORE_API auto WalkLog    (FRepository& InRepo, const FLogQuery& InQuery) -> TArray<FCommit>;
+	GITLINKCORE_API auto ListBranches(FRepository& InRepo) -> TArray<FBranch>;
+	GITLINKCORE_API auto ListRemotes (FRepository& InRepo) -> TArray<FRemote>;
 }
