@@ -10,6 +10,7 @@
 namespace gitlink { class FRepository; }
 class FGitLink_StateCache;
 class FGitLink_CommandDispatcher;
+class FGitLink_Subprocess;
 
 // --------------------------------------------------------------------------------------------------------------------
 // FGitLink_Provider — libgit2-backed ISourceControlProvider.
@@ -120,6 +121,16 @@ public:
 
 	auto Get_StateCache() -> FGitLink_StateCache&;
 	auto Get_Repository() const -> gitlink::FRepository*;
+	auto Get_Subprocess() const -> FGitLink_Subprocess*;
+
+	// True when LFS is installed (git lfs version succeeded at connect time) AND the user
+	// has bUseLfsLocking enabled in the plugin settings. Drives UsesCheckout().
+	auto Is_LfsAvailable() const -> bool { return _bLfsAvailable; }
+
+	// True when the file's extension matches a wildcard from .gitattributes marked with the
+	// 'lockable' attribute. Populated once at connect time by probing via
+	// `git check-attr lockable *.uasset *.umap ...`.
+	auto Is_FileLockable(const FString& InAbsolutePath) const -> bool;
 
 	auto Get_PathToRepositoryRoot() const -> const FString& { return _PathToRepositoryRoot; }
 	auto Get_UserName()             const -> const FString& { return _UserName; }
@@ -140,8 +151,14 @@ private:
 	TUniquePtr<gitlink::FRepository>       _Repository;
 	TUniquePtr<FGitLink_StateCache>        _StateCache;
 	TUniquePtr<FGitLink_CommandDispatcher> _Dispatcher;  // constructed empty in Pass B
+	TUniquePtr<FGitLink_Subprocess>        _Subprocess;  // present once a repo is open
 
 	bool _bGitRepositoryFound = false;
+	bool _bLfsAvailable       = false;
+
+	// Extensions marked 'lockable' via .gitattributes. Populated at Connect time by running
+	// `git check-attr lockable *.uasset *.umap ...`. Each entry includes the leading dot.
+	TArray<FString> _LockableExtensions;
 
 	FString _PathToRepositoryRoot;  // resolved working tree root
 	FString _UserName;

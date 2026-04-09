@@ -4,6 +4,7 @@
 #include "GitLink_CommandDispatcher.h"
 #include "GitLink_ChangelistState.h"
 #include "GitLink_StateCache.h"
+#include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 #include "Slate/SGitLink_Settings.h"
 
@@ -62,7 +63,10 @@ auto FGitLink_Provider::Close() -> void
 	UE_LOG(LogGitLink, Log, TEXT("FGitLink_Provider::Close"));
 
 	_Repository.Reset();
+	_Subprocess.Reset();
 	_bGitRepositoryFound = false;
+	_bLfsAvailable = false;
+	_LockableExtensions.Reset();
 	_PathToRepositoryRoot.Reset();
 	_UserName.Reset();
 	_UserEmail.Reset();
@@ -117,9 +121,36 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 	_UserName  = Sig.Name;
 	_UserEmail = Sig.Email;
 
+	// Stand up the subprocess helper (for LFS lock, check-attr, hook fallback) before we probe
+	// anything that needs it. Falls back to "git" on PATH when no override is configured.
+	const FString GitBinary = (Settings != nullptr && !Settings->GitBinaryOverride.IsEmpty())
+		? Settings->GitBinaryOverride
+		: TEXT("git");
+	_Subprocess = MakeUnique<FGitLink_Subprocess>(GitBinary, _PathToRepositoryRoot);
+
+	// Probe for git-lfs. If unavailable we'll still connect; UsesCheckout just stays off.
+	_bLfsAvailable = _Subprocess->IsLfsAvailable();
+
+	// Discover lockable extensions via .gitattributes. Drives Is_FileLockable and the Lock
+	// state population in Cmd_Connect / Cmd_UpdateStatus.
+	_LockableExtensions.Reset();
+	if (_bLfsAvailable)
+	{
+		const TArray<FString> Wildcards {
+			TEXT("*.uasset"),
+			TEXT("*.umap"),
+			TEXT("*.uexp"),
+			TEXT("*.ubulk"),
+		};
+		_LockableExtensions = _Subprocess->ProbeLockableExtensions(Wildcards);
+	}
+
 	UE_LOG(LogGitLink, Log,
-		TEXT("CheckRepositoryStatus: repo='%s' branch='%s' remote='%s' user='%s <%s>'"),
-		*_PathToRepositoryRoot, *_BranchName, *_RemoteUrl, *_UserName, *_UserEmail);
+		TEXT("CheckRepositoryStatus: repo='%s' branch='%s' remote='%s' user='%s <%s>' ")
+		TEXT("lfs=%s lockable_exts=%d"),
+		*_PathToRepositoryRoot, *_BranchName, *_RemoteUrl, *_UserName, *_UserEmail,
+		_bLfsAvailable ? TEXT("yes") : TEXT("no"),
+		_LockableExtensions.Num());
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -272,12 +303,17 @@ auto FGitLink_Provider::UsesChangelists() const -> bool
 
 auto FGitLink_Provider::UsesCheckout() const -> bool
 {
-	// "Checkout" in Unreal == acquire an LFS lock. In v1 GitLink has no real LFS integration —
-	// the Cmd_CheckOut handler is a stub that can't actually acquire a server-side lock. Returning
-	// false here makes the editor skip the checkout prompt entirely, which matches the standard
-	// non-LFS git workflow (just edit and save). When FGitLink_Subprocess + real LFS lock support
-	// land, this flips to return UGitLink_Settings::bUseLfsLocking again.
-	return false;
+	// "Checkout" in Unreal == acquire an LFS lock. Three conditions must hold:
+	//   1. The user has bUseLfsLocking on in the plugin settings
+	//   2. git-lfs is actually installed (probed at connect time)
+	//   3. The repo's .gitattributes marks at least one extension as 'lockable'
+	//
+	// Condition 3 prevents us from offering Check Out in repos that don't use LFS locking at
+	// all — otherwise the editor would prompt on every binary asset and every lock call would
+	// fail noisily.
+	const UGitLink_Settings* Settings = GetDefault<UGitLink_Settings>();
+	const bool bUserEnabled = Settings != nullptr && Settings->bUseLfsLocking;
+	return bUserEnabled && _bLfsAvailable && _LockableExtensions.Num() > 0;
 }
 
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
@@ -397,6 +433,24 @@ auto FGitLink_Provider::Get_StateCache() -> FGitLink_StateCache&
 auto FGitLink_Provider::Get_Repository() const -> gitlink::FRepository*
 {
 	return _Repository.Get();
+}
+
+auto FGitLink_Provider::Get_Subprocess() const -> FGitLink_Subprocess*
+{
+	return _Subprocess.Get();
+}
+
+auto FGitLink_Provider::Is_FileLockable(const FString& InAbsolutePath) const -> bool
+{
+	if (_LockableExtensions.IsEmpty())
+	{ return false; }
+
+	for (const FString& Ext : _LockableExtensions)
+	{
+		if (InAbsolutePath.EndsWith(Ext, ESearchCase::IgnoreCase))
+		{ return true; }
+	}
+	return false;
 }
 
 auto FGitLink_Provider::Broadcast_StateChanged() -> void

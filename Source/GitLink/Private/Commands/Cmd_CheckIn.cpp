@@ -59,15 +59,23 @@ namespace gitlink::cmd
 			return FCommandResult::Fail(FText::FromString(CommitRes.ErrorMessage));
 		}
 
-		// Build predictive Unmodified states for the committed files.
+		// Release any LFS locks we held on the committed files so they're free for the next
+		// editor to check out. This is typical behaviour for LFS-locked workflows — the
+		// edit-commit cycle ends with the lock being released.
+		Release_LfsLocksBestEffort(InCtx, InFiles);
+
+		// Build predictive Unmodified states for the committed files, stamping the Lock
+		// component back to NotLocked (or Unlockable for non-lockable files).
 		FCommandResult Result = FCommandResult::Ok();
 		Result.UpdatedStates.Reserve(InFiles.Num());
 		for (const FString& File : InFiles)
 		{
-			Result.UpdatedStates.Add(Make_FileState(
-				Normalize_AbsolutePath(File),
-				EGitLink_FileState::Unknown,
-				EGitLink_TreeState::Unmodified));
+			const bool bLockable = InCtx.Provider.Is_FileLockable(File);
+			FGitLink_CompositeState Composite;
+			Composite.File = EGitLink_FileState::Unknown;
+			Composite.Tree = EGitLink_TreeState::Unmodified;
+			Composite.Lock = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
+			Result.UpdatedStates.Add(Make_FileState(Normalize_AbsolutePath(File), Composite));
 		}
 
 		CheckInOp->SetSuccessMessage(FText::Format(
