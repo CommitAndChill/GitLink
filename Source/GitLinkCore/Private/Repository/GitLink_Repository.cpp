@@ -187,19 +187,19 @@ namespace gitlink
 
 	auto FRepository::Commit(const FCommitParams& InParams) -> FResult { return op::CreateCommit(*this, InParams); }
 
-	auto FRepository::Get_Log(const FLogQuery& /*InQuery*/) -> TArray<FCommit>
+	auto FRepository::Get_Log(const FLogQuery& InQuery) -> TArray<FCommit>
 	{
-		return TArray<FCommit>{};
+		return op::WalkLog(*this, InQuery);
 	}
 
 	auto FRepository::Get_Branches() -> TArray<FBranch>
 	{
-		return TArray<FBranch>{};
+		return op::ListBranches(*this);
 	}
 
 	auto FRepository::Get_Remotes() -> TArray<FRemote>
 	{
-		return TArray<FRemote>{};
+		return op::ListRemotes(*this);
 	}
 
 	auto FRepository::Fetch(const FFetchParams& /*InParams*/, FProgressCallback /*InProgress*/) -> FResult
