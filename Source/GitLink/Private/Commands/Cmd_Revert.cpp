@@ -52,14 +52,21 @@ namespace gitlink::cmd
 			return FCommandResult::Fail(FText::FromString(DiscardRes.ErrorMessage));
 		}
 
+		// Release any LFS locks we held on the reverted files — since we just threw away
+		// local changes, there's no reason to hold the exclusive edit lock anymore. Best-
+		// effort: non-lockable or non-locked files are skipped silently.
+		Release_LfsLocksBestEffort(InCtx, InFiles);
+
 		FCommandResult Result = FCommandResult::Ok();
 		Result.UpdatedStates.Reserve(InFiles.Num());
 		for (const FString& File : InFiles)
 		{
-			Result.UpdatedStates.Add(Make_FileState(
-				Normalize_AbsolutePath(File),
-				EGitLink_FileState::Unknown,
-				EGitLink_TreeState::Unmodified));
+			const bool bLockable = InCtx.Provider.Is_FileLockable(File);
+			FGitLink_CompositeState Composite;
+			Composite.File = EGitLink_FileState::Unknown;
+			Composite.Tree = EGitLink_TreeState::Unmodified;
+			Composite.Lock = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
+			Result.UpdatedStates.Add(Make_FileState(Normalize_AbsolutePath(File), Composite));
 		}
 		return Result;
 	}

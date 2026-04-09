@@ -1,6 +1,11 @@
 #pragma once
 
+#include "GitLink/GitLink_Provider.h"
 #include "GitLink/GitLink_State.h"
+#include "GitLink_CommandDispatcher.h"
+#include "GitLink_StateCache.h"
+#include "GitLink_Subprocess.h"
+#include "GitLinkLog.h"
 
 #include <CoreMinimal.h>
 #include <Misc/DateTime.h>
@@ -43,5 +48,80 @@ namespace gitlink::cmd
 		FString Out = InPath;
 		FPaths::NormalizeFilename(Out);
 		return Out;
+	}
+
+	// Convert an absolute file path to a repo-relative, forward-slash path suitable for passing
+	// to git / git-lfs commands (both of which expect forward slashes regardless of platform).
+	inline auto ToRepoRelativePath(const FString& InRepoRootAbsolute, const FString& InAbsolute) -> FString
+	{
+		FString Rel = InAbsolute;
+		if (!InRepoRootAbsolute.IsEmpty() && Rel.StartsWith(InRepoRootAbsolute))
+		{
+			Rel.RightChopInline(InRepoRootAbsolute.Len(), EAllowShrinking::No);
+		}
+		Rel.ReplaceInline(TEXT("\\"), TEXT("/"));
+		Rel.RemoveFromStart(TEXT("/"));
+		return Rel;
+	}
+
+	// Releases any LFS locks that the current user holds on the given files. Best-effort:
+	// files that aren't locked (or aren't lockable) are silently skipped, so callers can pass
+	// a mixed set without pre-filtering. Returns true if the unlock call succeeded (or was
+	// a no-op); returns false only when the subprocess itself failed.
+	//
+	// Used by Cmd_Revert (release after discarding local changes) and Cmd_CheckIn (release
+	// after the commit so the file is free for the next editor to check out).
+	//
+	// NOTE: consults InCtx.StateCache to skip files we know aren't Locked by us. Unknown-lock
+	// files are still attempted because the editor cache might be stale.
+	inline auto Release_LfsLocksBestEffort(
+		FCommandContext&       InCtx,
+		const TArray<FString>& InAbsoluteFiles) -> bool
+	{
+		if (InCtx.Subprocess == nullptr || !InCtx.Subprocess->IsValid())
+		{ return true; }  // no LFS subsystem, nothing to do
+
+		if (!InCtx.Provider.Is_LfsAvailable())
+		{ return true; }
+
+		TArray<FString> RelativePaths;
+		RelativePaths.Reserve(InAbsoluteFiles.Num());
+
+		for (const FString& Absolute : InAbsoluteFiles)
+		{
+			if (!InCtx.Provider.Is_FileLockable(Absolute))
+			{ continue; }
+
+			const FGitLink_FileStateRef State = InCtx.StateCache.Find_FileState(Absolute);
+			if (State->_State.Lock == EGitLink_LockState::Unlockable ||
+			    State->_State.Lock == EGitLink_LockState::LockedOther)
+			{ continue; }  // definitely not ours to release
+
+			RelativePaths.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, Absolute));
+		}
+
+		if (RelativePaths.IsEmpty())
+		{ return true; }  // nothing to unlock
+
+		TArray<FString> UnlockArgs;
+		UnlockArgs.Reserve(RelativePaths.Num() + 1);
+		UnlockArgs.Add(TEXT("unlock"));
+		UnlockArgs.Append(RelativePaths);
+
+		const FGitLink_SubprocessResult Result = InCtx.Subprocess->RunLfs(UnlockArgs);
+		if (!Result.IsSuccess())
+		{
+			// Non-fatal: log and continue. Typical failures are "file is not locked" which is
+			// exactly what we tolerate here; fatal errors (auth, network) should already have
+			// been caught at connect time.
+			UE_LOG(LogGitLink, Warning,
+				TEXT("Release_LfsLocksBestEffort: git lfs unlock returned: %s"),
+				*Result.Get_CombinedError());
+			return false;
+		}
+
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("Release_LfsLocksBestEffort: unlocked %d file(s)"), RelativePaths.Num());
+		return true;
 	}
 }

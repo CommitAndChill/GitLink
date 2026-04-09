@@ -128,9 +128,10 @@ auto FGitLink_CommandDispatcher::Execute_AndComplete(
 	// internals while running.
 	gitlink::cmd::FCommandContext Ctx
 	{
-		.Provider        = _Owner,
-		.StateCache      = _Owner.Get_StateCache(),
-		.Repository      = _Owner.Get_Repository(),
+		.Provider         = _Owner,
+		.StateCache       = _Owner.Get_StateCache(),
+		.Repository       = _Owner.Get_Repository(),
+		.Subprocess       = _Owner.Get_Subprocess(),
 		.RepoRootAbsolute = _Owner.Get_PathToRepositoryRoot(),
 	};
 

@@ -217,13 +217,21 @@ namespace gitlink::cmd
 			return History;
 		};
 
-		auto BuildState = [&Now, &bUpdateHistory, &BuildHistory](
+		auto BuildState = [&Now, &bUpdateHistory, &BuildHistory, &InCtx](
 			const FString& InFilename, const FGitLink_CompositeState& InComposite)
 			-> FGitLink_FileStateRef
 		{
 			FGitLink_FileStateRef State = MakeShared<FGitLink_FileState, ESPMode::ThreadSafe>(InFilename);
 			State->_State     = InComposite;
 			State->_TimeStamp = Now;
+
+			// Stamp the Lock component based on whether the file's extension is LFS-lockable.
+			// This is what makes CanCheckout return true for binary assets and false for plain
+			// text files, matching the existing GitSourceControl behaviour.
+			const bool bLockable = InCtx.Provider.Is_FileLockable(InFilename);
+			State->_State.Lock = bLockable
+				? EGitLink_LockState::NotLocked
+				: EGitLink_LockState::Unlockable;
 
 			if (bUpdateHistory)
 			{

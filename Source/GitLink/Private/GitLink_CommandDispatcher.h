@@ -8,6 +8,7 @@
 
 class FGitLink_Provider;
 class FGitLink_StateCache;
+class FGitLink_Subprocess;
 namespace gitlink { class FRepository; }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -30,9 +31,10 @@ namespace gitlink::cmd
 {
 	struct FCommandContext
 	{
-		FGitLink_Provider&   Provider;
-		FGitLink_StateCache& StateCache;
+		FGitLink_Provider&    Provider;
+		FGitLink_StateCache&  StateCache;
 		gitlink::FRepository* Repository;  // may be nullptr if the repo isn't open yet (e.g. during Connect)
+		FGitLink_Subprocess*  Subprocess;  // may be nullptr if no git binary configured / Close()d
 
 		// Absolute path to the repository working tree root — copied from the provider so command
 		// handlers don't need to take the provider lock to read it.

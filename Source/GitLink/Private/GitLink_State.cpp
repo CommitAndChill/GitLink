@@ -210,7 +210,12 @@ auto FGitLink_FileState::CanCheckIn() const -> bool
 
 auto FGitLink_FileState::CanCheckout() const -> bool
 {
-	// "Checkout" in git terms = acquire an LFS lock. Only meaningful for lockable files we don't already own.
+	// "Checkout" in Unreal source control == acquire an LFS lock.
+	//
+	// We return true when the file is LFS-lockable (Lock == NotLocked, as set by
+	// Cmd_Connect/Cmd_UpdateStatus after .gitattributes probing) AND it's not already locked
+	// by us (Locked) or by someone else (LockedOther). Non-lockable files are marked
+	// Unlockable at status population time and fall through to false here.
 	return _State.Lock == EGitLink_LockState::NotLocked;
 }
 

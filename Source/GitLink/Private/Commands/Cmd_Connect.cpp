@@ -100,6 +100,15 @@ namespace gitlink::cmd
 
 		const int32 DirtyCount = Result.UpdatedStates.Num();
 
+		// Stamp Lock state on the dirty states too — dirty files can still be lockable assets
+		// (e.g. a modified .uasset) and we want CanCheckout / IsCheckedOutOther to report the
+		// right thing for them once we populate actual lock-by-others info in a follow-up.
+		for (const FGitLink_FileStateRef& State : Result.UpdatedStates)
+		{
+			const bool bLockable = InCtx.Provider.Is_FileLockable(State->GetFilename());
+			State->_State.Lock = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
+		}
+
 		// Build a set of the dirty-file paths we've already emitted, so we don't clobber a real
 		// Modified/Added/Deleted state with an Unmodified one from the index enumeration.
 		TSet<FString> DirtyPaths;
@@ -112,6 +121,7 @@ namespace gitlink::cmd
 		const TArray<FString> TrackedRelative = gitlink::op::Enumerate_TrackedFiles(*InCtx.Repository);
 
 		int32 CleanCount = 0;
+		int32 LockableCount = 0;
 		Result.UpdatedStates.Reserve(Result.UpdatedStates.Num() + TrackedRelative.Num());
 		for (const FString& Relative : TrackedRelative)
 		{
@@ -119,16 +129,22 @@ namespace gitlink::cmd
 			if (DirtyPaths.Contains(Absolute))
 			{ continue; }  // dirty snapshot already has this file, don't overwrite
 
+			const bool bLockable = InCtx.Provider.Is_FileLockable(Absolute);
+
 			FGitLink_CompositeState Composite;
 			Composite.File = EGitLink_FileState::Unknown;
 			Composite.Tree = EGitLink_TreeState::Unmodified;
+			Composite.Lock = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
+
 			Result.UpdatedStates.Add(Make_FileState(Absolute, Composite));
 			++CleanCount;
+			if (bLockable) { ++LockableCount; }
 		}
 
 		UE_LOG(LogGitLink, Log,
-			TEXT("Cmd_Connect: initial state cache = %d dirty + %d unmodified-tracked file(s)"),
-			DirtyCount, CleanCount);
+			TEXT("Cmd_Connect: initial state cache = %d dirty + %d unmodified-tracked file(s) ")
+			TEXT("(%d lockable)"),
+			DirtyCount, CleanCount, LockableCount);
 
 		return Result;
 	}
