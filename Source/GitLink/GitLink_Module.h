@@ -1,5 +1,7 @@
 #pragma once
 
+#include "GitLink/GitLink_Provider.h"
+
 #include <CoreMinimal.h>
 #include <Modules/ModuleManager.h>
 
@@ -13,6 +15,9 @@ public:
 
 	static auto Get() -> FGitLinkModule&;
 
+	auto Get_Provider() -> FGitLink_Provider& { return _Provider; }
+
 private:
-	bool _ProviderRegistered = false;
+	FGitLink_Provider _Provider;
+	bool _bModularFeatureRegistered = false;
 };
