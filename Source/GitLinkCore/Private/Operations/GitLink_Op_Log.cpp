@@ -83,16 +83,17 @@ namespace gitlink::op
 		if (!InRepo.IsOpen())
 		{ return Out; }
 
-		if (!InQuery.PathFilter.IsEmpty())
-		{
-			UE_LOG(LogGitLinkCore, Warning,
-				TEXT("WalkLog: PathFilter='%s' not yet implemented — walking full history"),
-				*InQuery.PathFilter);
-		}
-
 		FScopeLock Lock(&InRepo.Get_Mutex());
 
 		git_repository* Raw = InRepo.Get_RawHandle();
+
+		// Path filter setup: we resolve the path once here (converting to UTF-8) and then
+		// in the walk loop we compare the blob OID at PathFilter in each commit's tree against
+		// the blob OID at PathFilter in the first parent's tree. If they differ (or one is
+		// missing), the commit touched the file and we include it in the result. This is cheap
+		// because tree lookups are fast and we never materialize diffs.
+		const bool bFilterByPath = !InQuery.PathFilter.IsEmpty();
+		FTCHARToUTF8 PathFilterUtf8(bFilterByPath ? *InQuery.PathFilter : TEXT(""));
 
 		git_revwalk* RawWalk = nullptr;
 		if (const int32 Rc = git_revwalk_new(&RawWalk, Raw); Rc < 0)
@@ -136,6 +137,39 @@ namespace gitlink::op
 		const int32 MaxCount = InQuery.MaxCount > 0 ? InQuery.MaxCount : TNumericLimits<int32>::Max();
 		Out.Reserve(FMath::Min(MaxCount, 256));
 
+		// Writes the blob OID of PathFilter in InCommit's tree into OutOid and returns true,
+		// or returns false (leaving OutOid untouched) when the path is not present or an error
+		// occurs. Caller must NOT read OutOid on a false return.
+		auto BlobAt = [PathUtf8 = bFilterByPath ? PathFilterUtf8.Get() : nullptr](
+			git_commit* InCommit, git_oid& OutOid) -> bool
+		{
+			if (InCommit == nullptr || PathUtf8 == nullptr)
+			{ return false; }
+
+			git_tree* RawTree = nullptr;
+			if (git_commit_tree(&RawTree, InCommit) < 0 || RawTree == nullptr)
+			{
+				if (RawTree) { git_tree_free(RawTree); }
+				return false;
+			}
+			libgit2::FTreePtr Tree(RawTree);
+
+			git_tree_entry* RawEntry = nullptr;
+			if (git_tree_entry_bypath(&RawEntry, Tree.Get(), PathUtf8) < 0 || RawEntry == nullptr)
+			{
+				if (RawEntry) { git_tree_entry_free(RawEntry); }
+				return false;
+			}
+			if (const git_oid* Oid = git_tree_entry_id(RawEntry))
+			{
+				OutOid = *Oid;
+				git_tree_entry_free(RawEntry);
+				return true;
+			}
+			git_tree_entry_free(RawEntry);
+			return false;
+		};
+
 		git_oid NextOid;
 		while (Out.Num() < MaxCount && git_revwalk_next(&NextOid, Walk.Get()) == 0)
 		{
@@ -146,10 +180,67 @@ namespace gitlink::op
 				continue;
 			}
 			libgit2::FCommitPtr Commit(RawCommit);
+
+			if (bFilterByPath)
+			{
+				git_oid MyBlob;
+				const bool bHaveMine = BlobAt(Commit.Get(), MyBlob);
+
+				// Walk parents. A commit is considered to have touched the file when its blob
+				// OID at PathFilter differs from EVERY parent's blob OID at PathFilter, OR when
+				// the file exists in this commit but not in any parent (initial add / rename-in),
+				// OR when the file existed in a parent but is now gone (rename-out / delete).
+				bool bTouchedFile = false;
+				const unsigned int ParentCount = git_commit_parentcount(Commit.Get());
+				if (ParentCount == 0)
+				{
+					// Root commit: it "touched" the file iff the file exists in its tree.
+					bTouchedFile = bHaveMine;
+				}
+				else
+				{
+					bool bMatchesAnyParent = false;
+					for (unsigned int ParentIdx = 0; ParentIdx < ParentCount; ++ParentIdx)
+					{
+						git_commit* RawParent = nullptr;
+						if (git_commit_parent(&RawParent, Commit.Get(), ParentIdx) < 0 || RawParent == nullptr)
+						{
+							if (RawParent) { git_commit_free(RawParent); }
+							continue;
+						}
+						libgit2::FCommitPtr Parent(RawParent);
+
+						git_oid ParentBlob;
+						const bool bHaveParent = BlobAt(Parent.Get(), ParentBlob);
+
+						if (bHaveMine && bHaveParent && git_oid_equal(&MyBlob, &ParentBlob) != 0)
+						{
+							// This parent has the same blob at that path — commit is a no-op
+							// relative to this parent.
+							bMatchesAnyParent = true;
+							break;
+						}
+						if (!bHaveMine && !bHaveParent)
+						{
+							// Neither has the file — also a no-op relative to this parent.
+							bMatchesAnyParent = true;
+							break;
+						}
+					}
+					bTouchedFile = !bMatchesAnyParent;
+				}
+
+				if (!bTouchedFile)
+				{ continue; }
+			}
+
 			Out.Add(Build_FCommit(Commit.Get()));
 		}
 
-		UE_LOG(LogGitLinkCore, Verbose, TEXT("WalkLog: returned %d commit(s)"), Out.Num());
+		UE_LOG(LogGitLinkCore, Verbose,
+			TEXT("WalkLog: returned %d commit(s)%s"),
+			Out.Num(),
+			bFilterByPath ? TEXT(" (path-filtered)") : TEXT(""));
 #endif  // WITH_LIBGIT2
 
 		return Out;
