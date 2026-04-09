@@ -2,6 +2,7 @@
 
 #include "GitLinkCore_Module.h"
 #include "GitLinkCoreLog.h"
+#include "Operations/GitLink_Ops.h"
 
 #if WITH_LIBGIT2
 #include "Libgit2/GitLink_Libgit2_Error.h"
@@ -167,12 +168,16 @@ namespace gitlink
 	}
 
 	// ----------------------------------------------------------------------------------------------------------------
-	// Stubs — each lands in its own Op_*.cpp file in a follow-up commit.
+	// Status delegates to op::ComputeStatus in Private/Operations/GitLink_Op_Status.cpp.
 	// ----------------------------------------------------------------------------------------------------------------
 	auto FRepository::Get_Status() -> FStatus
 	{
-		return FStatus{};
+		return op::ComputeStatus(*this);
 	}
+
+	// ----------------------------------------------------------------------------------------------------------------
+	// Stubs — each lands in its own Op_*.cpp file in a follow-up commit.
+	// ----------------------------------------------------------------------------------------------------------------
 
 	auto FRepository::Stage(const TArray<FString>& /*InPaths*/)          -> FResult { return NotImplemented(TEXT("Stage")); }
 	auto FRepository::Unstage(const TArray<FString>& /*InPaths*/)        -> FResult { return NotImplemented(TEXT("Unstage")); }
