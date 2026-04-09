@@ -1,3 +1,4 @@
+using System.IO;
 using UnrealBuildTool;
 
 public class GitLink : ModuleRules
@@ -7,6 +8,10 @@ public class GitLink : ModuleRules
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 		IWYUSupport = IWYUSupport.Full;
 		bUseUnity = false;
+
+		// Make the module root (where GitLink_Module.h and GitLinkLog.h live) findable from
+		// .cpp files inside Private/.
+		PrivateIncludePaths.Add(ModuleDirectory);
 
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
