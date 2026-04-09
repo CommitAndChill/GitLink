@@ -1,3 +1,4 @@
+#include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
 
 #include "GitLink/GitLink_Provider.h"
@@ -5,7 +6,14 @@
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
 
+#include <Misc/Paths.h>
 #include <SourceControlOperations.h>
+
+// Forward declarations for the GitLinkCore ops we need but aren't exposed via a public header.
+namespace gitlink::op
+{
+	auto Enumerate_TrackedFiles(gitlink::FRepository& InRepo) -> TArray<FString>;
+}
 
 namespace gitlink::cmd
 {
@@ -66,23 +74,61 @@ namespace gitlink::cmd
 			FText::FromString(InCtx.RepoRootAbsolute),
 			FText::FromString(BranchName)));
 
-		// Kick off an initial status population so the content browser has something to show
-		// immediately. UpdateStatus with an empty file list returns states for every dirty file
-		// in the working tree.
+		// Initial status population — two stages:
+		//
+		//   Stage 1: run the dirty-status scan to get states for everything the editor should
+		//            mark as modified / added / deleted / etc. These are the high-value states.
+		//
+		//   Stage 2: enumerate the git index and emit Unmodified states for every tracked file
+		//            NOT already in the dirty snapshot. Without this, content-browser right-click
+		//            menus would show everything as grayed-out for clean files because
+		//            IsSourceControlled() returns false for default (Tree=NotInRepo) states.
+		//
+		// Both stages feed into Result.UpdatedStates which the dispatcher merges into the cache
+		// on the game thread before broadcasting OnSourceControlStateChanged.
 		FCommandResult StatusResult = UpdateStatus(InCtx, InOperation, /*InFiles=*/ {});
 		if (StatusResult.bOk)
 		{
 			Result.UpdatedStates = MoveTemp(StatusResult.UpdatedStates);
-			UE_LOG(LogGitLink, Log,
-				TEXT("Cmd_Connect: initial status scan emitted %d dirty file(s)"),
-				Result.UpdatedStates.Num());
 		}
 		else
 		{
 			// Don't fail Connect on a status failure — the repo is open, user can click Refresh.
 			UE_LOG(LogGitLink, Warning,
-				TEXT("Cmd_Connect: initial status scan failed, continuing with empty cache"));
+				TEXT("Cmd_Connect: dirty-status scan failed, continuing"));
 		}
+
+		const int32 DirtyCount = Result.UpdatedStates.Num();
+
+		// Build a set of the dirty-file paths we've already emitted, so we don't clobber a real
+		// Modified/Added/Deleted state with an Unmodified one from the index enumeration.
+		TSet<FString> DirtyPaths;
+		DirtyPaths.Reserve(DirtyCount);
+		for (const FGitLink_FileStateRef& State : Result.UpdatedStates)
+		{
+			DirtyPaths.Add(State->GetFilename());
+		}
+
+		const TArray<FString> TrackedRelative = gitlink::op::Enumerate_TrackedFiles(*InCtx.Repository);
+
+		int32 CleanCount = 0;
+		Result.UpdatedStates.Reserve(Result.UpdatedStates.Num() + TrackedRelative.Num());
+		for (const FString& Relative : TrackedRelative)
+		{
+			const FString Absolute = Normalize_AbsolutePath(FPaths::Combine(InCtx.RepoRootAbsolute, Relative));
+			if (DirtyPaths.Contains(Absolute))
+			{ continue; }  // dirty snapshot already has this file, don't overwrite
+
+			FGitLink_CompositeState Composite;
+			Composite.File = EGitLink_FileState::Unknown;
+			Composite.Tree = EGitLink_TreeState::Unmodified;
+			Result.UpdatedStates.Add(Make_FileState(Absolute, Composite));
+			++CleanCount;
+		}
+
+		UE_LOG(LogGitLink, Log,
+			TEXT("Cmd_Connect: initial state cache = %d dirty + %d unmodified-tracked file(s)"),
+			DirtyCount, CleanCount);
 
 		return Result;
 	}

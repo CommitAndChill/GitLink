@@ -174,4 +174,44 @@ namespace gitlink::op
 
 		return Out;
 	}
+
+	// ----------------------------------------------------------------------------------------------------------------
+	auto Enumerate_TrackedFiles(FRepository& InRepo) -> TArray<FString>
+	{
+		TArray<FString> Out;
+
+#if WITH_LIBGIT2
+		if (!InRepo.IsOpen())
+		{ return Out; }
+
+		FScopeLock Lock(&InRepo.Get_Mutex());
+
+		git_index* RawIndex = nullptr;
+		if (git_repository_index(&RawIndex, InRepo.Get_RawHandle()) < 0 || RawIndex == nullptr)
+		{
+			if (RawIndex) { git_index_free(RawIndex); }
+			UE_LOG(LogGitLinkCore, Warning, TEXT("Enumerate_TrackedFiles: git_repository_index failed: %s"),
+				*libgit2::Get_LastErrorMessage());
+			return Out;
+		}
+		libgit2::FIndexPtr Index(RawIndex);
+
+		const size_t EntryCount = git_index_entrycount(Index.Get());
+		Out.Reserve(static_cast<int32>(EntryCount));
+
+		for (size_t EntryIdx = 0; EntryIdx < EntryCount; ++EntryIdx)
+		{
+			const git_index_entry* Entry = git_index_get_byindex(Index.Get(), EntryIdx);
+			if (Entry == nullptr || Entry->path == nullptr)
+			{ continue; }
+
+			Out.Add(FString(UTF8_TO_TCHAR(Entry->path)));
+		}
+
+		UE_LOG(LogGitLinkCore, Verbose,
+			TEXT("Enumerate_TrackedFiles: %d entries"), Out.Num());
+#endif  // WITH_LIBGIT2
+
+		return Out;
+	}
 }
