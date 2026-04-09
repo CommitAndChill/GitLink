@@ -202,13 +202,13 @@ namespace gitlink
 		return op::ListRemotes(*this);
 	}
 
-	auto FRepository::Fetch(const FFetchParams& /*InParams*/, FProgressCallback /*InProgress*/) -> FResult
+	auto FRepository::Fetch(const FFetchParams& InParams, FProgressCallback InProgress) -> FResult
 	{
-		return NotImplemented(TEXT("Fetch"));
+		return op::FetchRemote(*this, InParams, MoveTemp(InProgress));
 	}
 
-	auto FRepository::Push(const FPushParams& /*InParams*/, FProgressCallback /*InProgress*/) -> FResult
+	auto FRepository::Push(const FPushParams& InParams, FProgressCallback InProgress) -> FResult
 	{
-		return NotImplemented(TEXT("Push"));
+		return op::PushRemote(*this, InParams, MoveTemp(InProgress));
 	}
 }
