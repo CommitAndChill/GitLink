@@ -5,9 +5,15 @@
 #include "GitLink_ChangelistState.h"
 #include "GitLink_StateCache.h"
 #include "GitLinkLog.h"
+#include "Slate/SGitLink_Settings.h"
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
 #include "GitLinkCore/Repository/GitLink_Repository_Params.h"
+#include "GitLinkCore/Types/GitLink_Types.h"
+
+// Op_Signature declaration — no public header in GitLinkCore exposes it because it's primarily
+// an internal helper. Forward-declared here so the provider can call it.
+namespace gitlink::op { auto Get_DefaultSignature(gitlink::FRepository& InRepo) -> gitlink::FSignature; }
 
 #include <Misc/Paths.h>
 #include <SourceControlOperations.h>
@@ -105,9 +111,15 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		_RemoteUrl = Remotes[0].FetchUrl;
 	}
 
+	// Read user.name / user.email from git config. Empty values mean the user hasn't configured
+	// them; Cmd_CheckIn will surface a helpful error at commit time if that's the case.
+	const gitlink::FSignature Sig = gitlink::op::Get_DefaultSignature(*_Repository);
+	_UserName  = Sig.Name;
+	_UserEmail = Sig.Email;
+
 	UE_LOG(LogGitLink, Log,
-		TEXT("CheckRepositoryStatus: repo='%s' branch='%s' remote='%s'"),
-		*_PathToRepositoryRoot, *_BranchName, *_RemoteUrl);
+		TEXT("CheckRepositoryStatus: repo='%s' branch='%s' remote='%s' user='%s <%s>'"),
+		*_PathToRepositoryRoot, *_BranchName, *_RemoteUrl, *_UserName, *_UserEmail);
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -367,9 +379,7 @@ auto FGitLink_Provider::GetChangelists(EStateCacheUsage::Type /*InStateCacheUsag
 #if SOURCE_CONTROL_WITH_SLATE
 auto FGitLink_Provider::MakeSettingsWidget() const -> TSharedRef<class SWidget>
 {
-	// Real Slate widget lands in the UI pass. For now return an empty box so source control
-	// settings doesn't crash.
-	return SNew(SBox);
+	return SNew(SGitLink_Settings);
 }
 #endif
 
