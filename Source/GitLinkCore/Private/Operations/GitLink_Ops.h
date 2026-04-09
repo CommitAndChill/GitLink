@@ -20,6 +20,12 @@ namespace gitlink::op
 	// --- Status ---
 	GITLINKCORE_API auto ComputeStatus(FRepository& InRepo) -> FStatus;
 
+	// Enumerate every tracked file in the index as a repo-relative path. Fast (<100ms for
+	// ~10k files on a warm index) because the index is memory-mapped. Used by Cmd_Connect to
+	// pre-populate the state cache with Unmodified defaults for tracked files that won't
+	// show up in the dirty-status snapshot.
+	GITLINKCORE_API auto Enumerate_TrackedFiles(FRepository& InRepo) -> TArray<FString>;
+
 	// --- Index manipulation ---
 	GITLINKCORE_API auto StagePaths     (FRepository& InRepo, const TArray<FString>& InPaths) -> FResult;
 	GITLINKCORE_API auto UnstagePaths   (FRepository& InRepo, const TArray<FString>& InPaths) -> FResult;
