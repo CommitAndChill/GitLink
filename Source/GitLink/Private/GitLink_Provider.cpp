@@ -386,4 +386,10 @@ auto FGitLink_Provider::Get_Repository() const -> gitlink::FRepository*
 	return _Repository.Get();
 }
 
+auto FGitLink_Provider::Broadcast_StateChanged() -> void
+{
+	check(IsInGameThread());
+	_OnSourceControlStateChanged.Broadcast();
+}
+
 #undef LOCTEXT_NAMESPACE

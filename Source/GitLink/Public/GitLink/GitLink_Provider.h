@@ -127,6 +127,11 @@ public:
 	auto Get_BranchName()           const -> const FString& { return _BranchName; }
 	auto Get_RemoteUrl()            const -> const FString& { return _RemoteUrl; }
 
+	// Fire the OnSourceControlStateChanged delegate so the editor re-queries state for visible
+	// files. Called from the dispatcher on the game thread after merging command results into
+	// the cache.
+	auto Broadcast_StateChanged() -> void;
+
 private:
 	// Opens the libgit2 repository at ProjectDir (or the configured override) and caches the
 	// user / branch / remote metadata. Called from Init(true).

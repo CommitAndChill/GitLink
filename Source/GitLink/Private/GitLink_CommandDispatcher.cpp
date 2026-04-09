@@ -17,6 +17,12 @@ namespace gitlink::cmd
 {
 	extern auto Connect     (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
 	extern auto UpdateStatus(FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
+	extern auto MarkForAdd  (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
+	extern auto Delete      (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
+	extern auto Revert      (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
+	extern auto CheckIn     (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
+	extern auto Copy        (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
+	extern auto Resolve     (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
 }
 
 namespace
@@ -29,6 +35,12 @@ namespace
 	{
 		InDispatcher.Register(TEXT("Connect"),      &gitlink::cmd::Connect);
 		InDispatcher.Register(TEXT("UpdateStatus"), &gitlink::cmd::UpdateStatus);
+		InDispatcher.Register(TEXT("MarkForAdd"),   &gitlink::cmd::MarkForAdd);
+		InDispatcher.Register(TEXT("Delete"),       &gitlink::cmd::Delete);
+		InDispatcher.Register(TEXT("Revert"),       &gitlink::cmd::Revert);
+		InDispatcher.Register(TEXT("CheckIn"),      &gitlink::cmd::CheckIn);
+		InDispatcher.Register(TEXT("Copy"),         &gitlink::cmd::Copy);
+		InDispatcher.Register(TEXT("Resolve"),      &gitlink::cmd::Resolve);
 	}
 }
 
@@ -125,6 +137,7 @@ auto FGitLink_CommandDispatcher::Execute_AndComplete(
 		]() mutable
 		{
 			// Merge updated states into the provider's cache.
+			const bool bHadStateUpdates = Result.UpdatedStates.Num() > 0;
 			for (const FGitLink_FileStateRef& State : Result.UpdatedStates)
 			{
 				_Owner.Get_StateCache().Set_FileState(State->GetFilename(), State);
@@ -147,6 +160,13 @@ auto FGitLink_CommandDispatcher::Execute_AndComplete(
 			Complete.ExecuteIfBound(
 				OpRef,
 				Result.bOk ? ECommandResult::Succeeded : ECommandResult::Failed);
+
+			// Broadcast to the editor so content-browser markers and state columns refresh.
+			// Only worth firing when state actually changed; skip for pure queries.
+			if (bHadStateUpdates)
+			{
+				_Owner.Broadcast_StateChanged();
+			}
 		};
 
 	if (IsInGameThread())
