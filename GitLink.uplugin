@@ -1,0 +1,40 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "GitLink",
+	"Description": "In-process libgit2 source control provider for Unreal. Clean-room replacement for GitSourceControl.",
+	"Category": "Source Control",
+	"CreatedBy": "Chainkemists",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"EnabledByDefault": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "GitLinkCore",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"WhitelistPlatforms": [
+				"Win64",
+				"Mac",
+				"Linux"
+			]
+		},
+		{
+			"Name": "GitLink",
+			"Type": "UncookedOnly",
+			"LoadingPhase": "Default",
+			"WhitelistPlatforms": [
+				"Win64",
+				"Mac",
+				"Linux"
+			]
+		}
+	]
+}

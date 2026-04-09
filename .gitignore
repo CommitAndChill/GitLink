@@ -1,0 +1,22 @@
+# Unreal build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+
+# IDE / OS cruft
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Vendored libgit2 binaries are NOT committed here — they are dropped in locally per
+# Source/ThirdParty/libgit2/README.md. The Build.cs gracefully degrades to WITH_LIBGIT2=0
+# when they are missing. Uncomment and flip to explicit allow-list if that policy changes.
+Source/ThirdParty/libgit2/lib/
+Source/ThirdParty/libgit2/bin/
+Source/ThirdParty/libgit2/include/git2.h
+Source/ThirdParty/libgit2/include/git2/
