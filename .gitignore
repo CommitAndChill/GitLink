@@ -13,10 +13,10 @@ Thumbs.db
 *.swp
 *~
 
-# Vendored libgit2 binaries are NOT committed here — they are dropped in locally per
-# Source/ThirdParty/libgit2/README.md. The Build.cs gracefully degrades to WITH_LIBGIT2=0
-# when they are missing. Uncomment and flip to explicit allow-list if that policy changes.
-Source/ThirdParty/libgit2/lib/
-Source/ThirdParty/libgit2/bin/
-Source/ThirdParty/libgit2/include/git2.h
-Source/ThirdParty/libgit2/include/git2/
+# Vendored libgit2 binaries ARE committed — the plugin ships with them to avoid
+# requiring every contributor to build libgit2 from source. The Build.cs still
+# gracefully degrades to WITH_LIBGIT2=0 when they happen to be missing, for CI or
+# fresh checkouts on platforms we haven't built for yet.
+#
+# See Source/ThirdParty/libgit2/README.md for the build recipe used to produce the
+# committed binaries.
