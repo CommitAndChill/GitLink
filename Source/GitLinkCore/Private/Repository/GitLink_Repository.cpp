@@ -179,11 +179,11 @@ namespace gitlink
 	// Stubs — each lands in its own Op_*.cpp file in a follow-up commit.
 	// ----------------------------------------------------------------------------------------------------------------
 
-	auto FRepository::Stage(const TArray<FString>& /*InPaths*/)          -> FResult { return NotImplemented(TEXT("Stage")); }
-	auto FRepository::Unstage(const TArray<FString>& /*InPaths*/)        -> FResult { return NotImplemented(TEXT("Unstage")); }
-	auto FRepository::StageAll()                                         -> FResult { return NotImplemented(TEXT("StageAll")); }
-	auto FRepository::UnstageAll()                                       -> FResult { return NotImplemented(TEXT("UnstageAll")); }
-	auto FRepository::DiscardChanges(const TArray<FString>& /*InPaths*/) -> FResult { return NotImplemented(TEXT("DiscardChanges")); }
+	auto FRepository::Stage(const TArray<FString>& InPaths)          -> FResult { return op::StagePaths(*this, InPaths); }
+	auto FRepository::Unstage(const TArray<FString>& InPaths)        -> FResult { return op::UnstagePaths(*this, InPaths); }
+	auto FRepository::StageAll()                                     -> FResult { return op::StageAll(*this); }
+	auto FRepository::UnstageAll()                                   -> FResult { return op::UnstageAll(*this); }
+	auto FRepository::DiscardChanges(const TArray<FString>& InPaths) -> FResult { return op::DiscardChanges(*this, InPaths); }
 
 	auto FRepository::Commit(const FCommitParams& /*InParams*/) -> FResult { return NotImplemented(TEXT("Commit")); }
 
