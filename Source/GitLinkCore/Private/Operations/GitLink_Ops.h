@@ -26,4 +26,7 @@ namespace gitlink::op
 	GITLINKCORE_API auto StageAll       (FRepository& InRepo) -> FResult;
 	GITLINKCORE_API auto UnstageAll     (FRepository& InRepo) -> FResult;
 	GITLINKCORE_API auto DiscardChanges (FRepository& InRepo, const TArray<FString>& InPaths) -> FResult;
+
+	// --- Commits ---
+	GITLINKCORE_API auto CreateCommit(FRepository& InRepo, const FCommitParams& InParams) -> FResult;
 }

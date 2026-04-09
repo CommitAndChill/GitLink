@@ -185,7 +185,7 @@ namespace gitlink
 	auto FRepository::UnstageAll()                                   -> FResult { return op::UnstageAll(*this); }
 	auto FRepository::DiscardChanges(const TArray<FString>& InPaths) -> FResult { return op::DiscardChanges(*this, InPaths); }
 
-	auto FRepository::Commit(const FCommitParams& /*InParams*/) -> FResult { return NotImplemented(TEXT("Commit")); }
+	auto FRepository::Commit(const FCommitParams& InParams) -> FResult { return op::CreateCommit(*this, InParams); }
 
 	auto FRepository::Get_Log(const FLogQuery& /*InQuery*/) -> TArray<FCommit>
 	{
