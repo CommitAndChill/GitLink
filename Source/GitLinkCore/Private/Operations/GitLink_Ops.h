@@ -19,4 +19,11 @@ namespace gitlink::op
 {
 	// --- Status ---
 	GITLINKCORE_API auto ComputeStatus(FRepository& InRepo) -> FStatus;
+
+	// --- Index manipulation ---
+	GITLINKCORE_API auto StagePaths     (FRepository& InRepo, const TArray<FString>& InPaths) -> FResult;
+	GITLINKCORE_API auto UnstagePaths   (FRepository& InRepo, const TArray<FString>& InPaths) -> FResult;
+	GITLINKCORE_API auto StageAll       (FRepository& InRepo) -> FResult;
+	GITLINKCORE_API auto UnstageAll     (FRepository& InRepo) -> FResult;
+	GITLINKCORE_API auto DiscardChanges (FRepository& InRepo, const TArray<FString>& InPaths) -> FResult;
 }
