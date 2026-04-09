@@ -23,6 +23,8 @@ namespace gitlink::cmd
 	extern auto CheckIn     (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
 	extern auto Copy        (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
 	extern auto Resolve     (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
+	extern auto Fetch       (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
+	extern auto Sync        (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
 }
 
 namespace
@@ -41,6 +43,8 @@ namespace
 		InDispatcher.Register(TEXT("CheckIn"),      &gitlink::cmd::CheckIn);
 		InDispatcher.Register(TEXT("Copy"),         &gitlink::cmd::Copy);
 		InDispatcher.Register(TEXT("Resolve"),      &gitlink::cmd::Resolve);
+		InDispatcher.Register(TEXT("Fetch"),        &gitlink::cmd::Fetch);
+		InDispatcher.Register(TEXT("Sync"),         &gitlink::cmd::Sync);
 	}
 }
 

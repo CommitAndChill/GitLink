@@ -36,6 +36,7 @@ namespace gitlink::op
 	GITLINKCORE_API auto ListRemotes (FRepository& InRepo) -> TArray<FRemote>;
 
 	// --- Network ---
-	GITLINKCORE_API auto FetchRemote(FRepository& InRepo, const FFetchParams& InParams, FProgressCallback InProgress) -> FResult;
-	GITLINKCORE_API auto PushRemote (FRepository& InRepo, const FPushParams&  InParams, FProgressCallback InProgress) -> FResult;
+	GITLINKCORE_API auto FetchRemote    (FRepository& InRepo, const FFetchParams& InParams, FProgressCallback InProgress) -> FResult;
+	GITLINKCORE_API auto PushRemote     (FRepository& InRepo, const FPushParams&  InParams, FProgressCallback InProgress) -> FResult;
+	GITLINKCORE_API auto PullFastForward(FRepository& InRepo, const FFetchParams& InParams, FProgressCallback InProgress) -> FResult;
 }

@@ -211,4 +211,9 @@ namespace gitlink
 	{
 		return op::PushRemote(*this, InParams, MoveTemp(InProgress));
 	}
+
+	auto FRepository::PullFastForward(const FFetchParams& InParams, FProgressCallback InProgress) -> FResult
+	{
+		return op::PullFastForward(*this, InParams, MoveTemp(InProgress));
+	}
 }

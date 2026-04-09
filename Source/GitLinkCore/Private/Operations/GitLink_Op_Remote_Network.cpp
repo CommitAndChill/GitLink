@@ -260,4 +260,114 @@ namespace gitlink::op
 		return FResult::Fail(TEXT("PushRemote: compiled without libgit2"));
 #endif
 	}
+
+	// ----------------------------------------------------------------------------------------------------------------
+	auto PullFastForward(FRepository& InRepo, const FFetchParams& InParams, FProgressCallback InProgress) -> FResult
+	{
+#if WITH_LIBGIT2
+		// 1. Fetch first. Reuses the full fetch op so progress + credentials work identically.
+		if (const FResult Fetched = FetchRemote(InRepo, InParams, InProgress); !Fetched)
+		{
+			return Fetched;
+		}
+
+		FScopeLock Lock(&InRepo.Get_Mutex());
+
+		git_repository* Raw = InRepo.Get_RawHandle();
+
+		// 2. Resolve HEAD. Must be a branch ref, not detached.
+		git_reference* RawHead = nullptr;
+		if (const int32 Rc = git_repository_head(&RawHead, Raw); Rc < 0)
+		{
+			if (RawHead) { git_reference_free(RawHead); }
+			return libgit2::MakeFailResult(TEXT("PullFastForward: git_repository_head"), Rc);
+		}
+		libgit2::FReferencePtr Head(RawHead);
+
+		if (git_reference_is_branch(Head.Get()) == 0)
+		{
+			return FResult::Fail(TEXT("PullFastForward: HEAD is not a branch (detached HEAD)"));
+		}
+
+		// 3. Get the upstream ref (e.g. refs/remotes/origin/main).
+		git_reference* RawUpstream = nullptr;
+		if (const int32 Rc = git_branch_upstream(&RawUpstream, Head.Get()); Rc < 0)
+		{
+			if (RawUpstream) { git_reference_free(RawUpstream); }
+			return FResult::Fail(FString::Printf(
+				TEXT("PullFastForward: no upstream configured for current branch: %s"),
+				*libgit2::Get_LastErrorMessage()));
+		}
+		libgit2::FReferencePtr Upstream(RawUpstream);
+
+		// 4. Convert upstream ref to an annotated commit for merge_analysis.
+		git_annotated_commit* RawTheirsHead = nullptr;
+		if (const int32 Rc = git_annotated_commit_from_ref(&RawTheirsHead, Raw, Upstream.Get()); Rc < 0)
+		{
+			if (RawTheirsHead) { git_annotated_commit_free(RawTheirsHead); }
+			return libgit2::MakeFailResult(TEXT("PullFastForward: git_annotated_commit_from_ref"), Rc);
+		}
+
+		const git_annotated_commit* TheirsHead = RawTheirsHead;
+		git_merge_analysis_t   Analysis   = GIT_MERGE_ANALYSIS_NONE;
+		git_merge_preference_t Preference = GIT_MERGE_PREFERENCE_NONE;
+
+		const int32 AnaRc = git_merge_analysis(&Analysis, &Preference, Raw, &TheirsHead, 1);
+		if (AnaRc < 0)
+		{
+			git_annotated_commit_free(RawTheirsHead);
+			return libgit2::MakeFailResult(TEXT("PullFastForward: git_merge_analysis"), AnaRc);
+		}
+
+		// 5. Act on the analysis result.
+		if ((Analysis & GIT_MERGE_ANALYSIS_UP_TO_DATE) != 0)
+		{
+			git_annotated_commit_free(RawTheirsHead);
+			UE_LOG(LogGitLinkCore, Log, TEXT("PullFastForward: already up to date"));
+			return FResult::Ok();
+		}
+
+		if ((Analysis & GIT_MERGE_ANALYSIS_FASTFORWARD) == 0)
+		{
+			git_annotated_commit_free(RawTheirsHead);
+			return FResult::Fail(TEXT(
+				"PullFastForward: non-fast-forward merge required. "
+				"Use `git pull` or `git merge` from a terminal to resolve manually."));
+		}
+
+		// 6. Fast-forward: point HEAD's ref at the upstream OID, then checkout.
+		const git_oid* TheirsOid = git_annotated_commit_id(RawTheirsHead);
+		git_reference* RawNewHead = nullptr;
+		const int32 SetTargetRc = git_reference_set_target(
+			&RawNewHead, Head.Get(), TheirsOid, "GitLink fast-forward");
+		git_annotated_commit_free(RawTheirsHead);
+
+		if (SetTargetRc < 0 || RawNewHead == nullptr)
+		{
+			if (RawNewHead) { git_reference_free(RawNewHead); }
+			return libgit2::MakeFailResult(TEXT("PullFastForward: git_reference_set_target"), SetTargetRc);
+		}
+		libgit2::FReferencePtr NewHead(RawNewHead);
+
+		// 7. Force-checkout HEAD to sync the working tree.
+		git_checkout_options CheckoutOpts;
+		if (const int32 Rc = git_checkout_options_init(&CheckoutOpts, GIT_CHECKOUT_OPTIONS_VERSION); Rc < 0)
+		{
+			return libgit2::MakeFailResult(TEXT("PullFastForward: git_checkout_options_init"), Rc);
+		}
+		CheckoutOpts.checkout_strategy = GIT_CHECKOUT_SAFE;  // safer than FORCE; errors if local dirty
+
+		if (const int32 Rc = git_checkout_head(Raw, &CheckoutOpts); Rc < 0)
+		{
+			return libgit2::MakeFailResult(
+				TEXT("PullFastForward: git_checkout_head (local modifications would be overwritten?)"),
+				Rc);
+		}
+
+		UE_LOG(LogGitLinkCore, Log, TEXT("PullFastForward: fast-forwarded HEAD"));
+		return FResult::Ok();
+#else
+		return FResult::Fail(TEXT("PullFastForward: compiled without libgit2"));
+#endif
+	}
 }
