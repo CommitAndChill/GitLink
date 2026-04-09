@@ -25,6 +25,12 @@ namespace gitlink::cmd
 	extern auto Resolve     (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
 	extern auto Fetch       (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
 	extern auto Sync        (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
+	extern auto CheckOut    (FCommandContext& Ctx, const FSourceControlOperationRef& Op, const TArray<FString>& Files) -> FCommandResult;
+	extern auto NewChangelist           (FCommandContext&, const FSourceControlOperationRef&, const TArray<FString>&) -> FCommandResult;
+	extern auto DeleteChangelist        (FCommandContext&, const FSourceControlOperationRef&, const TArray<FString>&) -> FCommandResult;
+	extern auto EditChangelist          (FCommandContext&, const FSourceControlOperationRef&, const TArray<FString>&) -> FCommandResult;
+	extern auto MoveToChangelist        (FCommandContext&, const FSourceControlOperationRef&, const TArray<FString>&) -> FCommandResult;
+	extern auto UpdateChangelistsStatus (FCommandContext&, const FSourceControlOperationRef&, const TArray<FString>&) -> FCommandResult;
 }
 
 namespace
@@ -43,8 +49,14 @@ namespace
 		InDispatcher.Register(TEXT("CheckIn"),      &gitlink::cmd::CheckIn);
 		InDispatcher.Register(TEXT("Copy"),         &gitlink::cmd::Copy);
 		InDispatcher.Register(TEXT("Resolve"),      &gitlink::cmd::Resolve);
-		InDispatcher.Register(TEXT("Fetch"),        &gitlink::cmd::Fetch);
-		InDispatcher.Register(TEXT("Sync"),         &gitlink::cmd::Sync);
+		InDispatcher.Register(TEXT("Fetch"),                   &gitlink::cmd::Fetch);
+		InDispatcher.Register(TEXT("Sync"),                    &gitlink::cmd::Sync);
+		InDispatcher.Register(TEXT("CheckOut"),                &gitlink::cmd::CheckOut);
+		InDispatcher.Register(TEXT("NewChangelist"),           &gitlink::cmd::NewChangelist);
+		InDispatcher.Register(TEXT("DeleteChangelist"),        &gitlink::cmd::DeleteChangelist);
+		InDispatcher.Register(TEXT("EditChangelist"),          &gitlink::cmd::EditChangelist);
+		InDispatcher.Register(TEXT("MoveToChangelist"),        &gitlink::cmd::MoveToChangelist);
+		InDispatcher.Register(TEXT("UpdateChangelistsStatus"), &gitlink::cmd::UpdateChangelistsStatus);
 	}
 }
 
