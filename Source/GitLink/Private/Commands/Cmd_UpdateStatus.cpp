@@ -1,6 +1,8 @@
+#include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
 
 #include "GitLink/GitLink_Provider.h"
+#include "GitLink/GitLink_Revision.h"
 #include "GitLinkLog.h"
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
@@ -158,14 +160,75 @@ namespace gitlink::cmd
 		FCommandResult Result = FCommandResult::Ok();
 		Result.UpdatedStates.Reserve(FMath::Max(InFiles.Num(), CompositeByPath.Num()));
 
+		// Check the operation flags. FUpdateStatus has bUpdateHistory which the editor sets
+		// when the user opens the History dialog on a file — we need to walk the git log
+		// filtered by that file and populate FGitLink_FileState::_History with revisions.
+		bool bUpdateHistory = false;
+		if (InOperation->GetName() == TEXT("UpdateStatus"))
+		{
+			TSharedRef<FUpdateStatus> UpdateOp = StaticCastSharedRef<FUpdateStatus>(InOperation);
+			bUpdateHistory = UpdateOp->ShouldUpdateHistory();
+		}
+
 		const FDateTime Now = FDateTime::UtcNow();
 
-		auto BuildState = [&Now](const FString& InFilename, const FGitLink_CompositeState& InComposite)
+		// Populate an FGitLink_FileState::_History array by walking the log, path-filtered
+		// on the repo-relative path. Up to 100 revisions for v1.
+		auto BuildHistory = [&InCtx](const FString& InAbsoluteFilename) -> FGitLink_History
+		{
+			FGitLink_History History;
+
+			FString RelativePath = InAbsoluteFilename;
+			if (!InCtx.RepoRootAbsolute.IsEmpty() && RelativePath.StartsWith(InCtx.RepoRootAbsolute))
+			{
+				RelativePath.RightChopInline(InCtx.RepoRootAbsolute.Len(), EAllowShrinking::No);
+			}
+			// libgit2 wants forward slashes in tree paths regardless of platform.
+			RelativePath.ReplaceInline(TEXT("\\"), TEXT("/"));
+			RelativePath.RemoveFromStart(TEXT("/"));
+
+			if (RelativePath.IsEmpty() || InCtx.Repository == nullptr)
+			{ return History; }
+
+			FLogQuery Query;
+			Query.PathFilter = RelativePath;
+			Query.MaxCount   = 100;
+
+			const TArray<FCommit> Commits = InCtx.Repository->Get_Log(Query);
+			History.Reserve(Commits.Num());
+
+			int32 RevNumber = Commits.Num();
+			for (const FCommit& Commit : Commits)
+			{
+				TSharedRef<FGitLink_Revision, ESPMode::ThreadSafe> Rev =
+					MakeShared<FGitLink_Revision, ESPMode::ThreadSafe>();
+				Rev->_Filename          = InAbsoluteFilename;
+				Rev->_CommitId          = Commit.Hash;
+				Rev->_ShortCommitId     = Commit.ShortHash;
+				Rev->_Description       = Commit.Summary.IsEmpty() ? Commit.Message : Commit.Summary;
+				Rev->_UserName          = Commit.Author.Name;
+				Rev->_Action            = TEXT("Changed");
+				Rev->_Date              = Commit.Author.When;
+				Rev->_RevisionNumber    = RevNumber--;
+				Rev->_CheckInIdentifier = Rev->_RevisionNumber;
+				History.Add(Rev);
+			}
+
+			return History;
+		};
+
+		auto BuildState = [&Now, &bUpdateHistory, &BuildHistory](
+			const FString& InFilename, const FGitLink_CompositeState& InComposite)
 			-> FGitLink_FileStateRef
 		{
 			FGitLink_FileStateRef State = MakeShared<FGitLink_FileState, ESPMode::ThreadSafe>(InFilename);
 			State->_State     = InComposite;
 			State->_TimeStamp = Now;
+
+			if (bUpdateHistory)
+			{
+				State->_History = BuildHistory(InFilename);
+			}
 			return State;
 		};
 
