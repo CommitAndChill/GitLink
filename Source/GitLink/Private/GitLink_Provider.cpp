@@ -35,13 +35,20 @@ FGitLink_Provider::~FGitLink_Provider() = default;
 // --------------------------------------------------------------------------------------------------------------------
 auto FGitLink_Provider::Init(bool bInForceConnection) -> void
 {
-	UE_LOG(LogGitLink, Log, TEXT("FGitLink_Provider::Init(force=%s)"),
-		bInForceConnection ? TEXT("true") : TEXT("false"));
+	UE_LOG(LogGitLink, Log, TEXT("FGitLink_Provider::Init(force=%s, alreadyOpen=%s)"),
+		bInForceConnection ? TEXT("true") : TEXT("false"),
+		_bGitRepositoryFound ? TEXT("true") : TEXT("false"));
 
-	if (bInForceConnection)
+	// bForceConnection controls whether we re-probe when already connected; it does NOT gate
+	// whether we try to connect at all. The editor passes force=false on quiet re-activation
+	// (e.g. when the source control settings dialog reselects the current provider). We still
+	// want to open the repository in that case.
+	if (_bGitRepositoryFound && !bInForceConnection)
 	{
-		CheckRepositoryStatus();
+		return;
 	}
+
+	CheckRepositoryStatus();
 }
 
 auto FGitLink_Provider::Close() -> void
