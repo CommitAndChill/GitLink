@@ -59,6 +59,11 @@ namespace gitlink
 		// Network
 		virtual auto Fetch(const FFetchParams& InParams, FProgressCallback InProgress = nullptr) -> FResult = 0;
 		virtual auto Push (const FPushParams&  InParams, FProgressCallback InProgress = nullptr) -> FResult = 0;
+
+		// Fetch + fast-forward HEAD to its upstream. Returns a failing FResult if the merge
+		// would require anything more complex than a fast-forward (divergent history, merge
+		// commit required, etc.) — v1 callers must resolve non-FF pulls manually.
+		virtual auto PullFastForward(const FFetchParams& InParams, FProgressCallback InProgress = nullptr) -> FResult = 0;
 	};
 
 	// --------------------------------------------------------------------------------------------------------------------
@@ -102,6 +107,7 @@ namespace gitlink
 
 		auto Fetch(const FFetchParams& InParams, FProgressCallback InProgress = nullptr) -> FResult override;
 		auto Push (const FPushParams&  InParams, FProgressCallback InProgress = nullptr) -> FResult override;
+		auto PullFastForward(const FFetchParams& InParams, FProgressCallback InProgress = nullptr) -> FResult override;
 
 		// Access to the underlying libgit2 handle and serialising mutex.
 		// Operation implementations in Private/Operations/ use these to call into libgit2 directly.
