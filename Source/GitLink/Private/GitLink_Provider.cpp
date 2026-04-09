@@ -272,9 +272,12 @@ auto FGitLink_Provider::UsesChangelists() const -> bool
 
 auto FGitLink_Provider::UsesCheckout() const -> bool
 {
-	// "Checkout" in Unreal == acquire LFS lock. Driven by the settings toggle.
-	const UGitLink_Settings* Settings = GetDefault<UGitLink_Settings>();
-	return Settings != nullptr && Settings->bUseLfsLocking;
+	// "Checkout" in Unreal == acquire an LFS lock. In v1 GitLink has no real LFS integration —
+	// the Cmd_CheckOut handler is a stub that can't actually acquire a server-side lock. Returning
+	// false here makes the editor skip the checkout prompt entirely, which matches the standard
+	// non-LFS git workflow (just edit and save). When FGitLink_Subprocess + real LFS lock support
+	// land, this flips to return UGitLink_Settings::bUseLfsLocking again.
+	return false;
 }
 
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
