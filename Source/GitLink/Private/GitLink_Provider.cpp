@@ -326,17 +326,17 @@ auto FGitLink_Provider::UsesChangelists() const -> bool
 
 auto FGitLink_Provider::UsesCheckout() const -> bool
 {
-	// "Checkout" in Unreal == acquire an LFS lock. Three conditions must hold:
+	// "Checkout" in Unreal == acquire an LFS lock. Two conditions:
 	//   1. The user has bUseLfsLocking on in the plugin settings
 	//   2. git-lfs is actually installed (probed at connect time)
-	//   3. The repo's .gitattributes marks at least one extension as 'lockable'
 	//
-	// Condition 3 prevents us from offering Check Out in repos that don't use LFS locking at
-	// all — otherwise the editor would prompt on every binary asset and every lock call would
-	// fail noisily.
+	// We intentionally do NOT require .gitattributes to include the 'lockable' keyword.
+	// Most UE repos configure LFS via 'filter=lfs' without 'lockable', and users still
+	// expect the checkout workflow to work. The per-file Is_FileLockable gate (based on
+	// file extension) prevents non-binary files from being locked.
 	const UGitLink_Settings* Settings = GetDefault<UGitLink_Settings>();
 	const bool bUserEnabled = Settings != nullptr && Settings->bUseLfsLocking;
-	return bUserEnabled && _bLfsAvailable && _LockableExtensions.Num() > 0;
+	return bUserEnabled && _bLfsAvailable;
 }
 
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
@@ -465,10 +465,28 @@ auto FGitLink_Provider::Get_Subprocess() const -> FGitLink_Subprocess*
 
 auto FGitLink_Provider::Is_FileLockable(const FString& InAbsolutePath) const -> bool
 {
-	if (_LockableExtensions.IsEmpty())
-	{ return false; }
+	// If check-attr found explicit 'lockable' extensions, use those.
+	if (!_LockableExtensions.IsEmpty())
+	{
+		for (const FString& Ext : _LockableExtensions)
+		{
+			if (InAbsolutePath.EndsWith(Ext, ESearchCase::IgnoreCase))
+			{ return true; }
+		}
+		return false;
+	}
 
-	for (const FString& Ext : _LockableExtensions)
+	// Fallback: most UE repos use LFS for binary assets via 'filter=lfs' but omit the
+	// 'lockable' keyword from .gitattributes. We hardcode the common UE binary extensions
+	// so the checkout workflow works out of the box for typical Unreal projects.
+	static const TCHAR* DefaultLockableExts[] = {
+		TEXT(".uasset"),
+		TEXT(".umap"),
+		TEXT(".uexp"),
+		TEXT(".ubulk"),
+	};
+
+	for (const TCHAR* Ext : DefaultLockableExts)
 	{
 		if (InAbsolutePath.EndsWith(Ext, ESearchCase::IgnoreCase))
 		{ return true; }
