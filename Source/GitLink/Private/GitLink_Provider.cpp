@@ -4,6 +4,7 @@
 #include "GitLink_CommandDispatcher.h"
 #include "GitLink_ChangelistState.h"
 #include "GitLink_StateCache.h"
+#include "GitLink_BackgroundPoll.h"
 #include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 #include "Slate/SGitLink_Settings.h"
@@ -61,6 +62,12 @@ auto FGitLink_Provider::Init(bool bInForceConnection) -> void
 auto FGitLink_Provider::Close() -> void
 {
 	UE_LOG(LogGitLink, Log, TEXT("FGitLink_Provider::Close"));
+
+	if (_BackgroundPoll.IsValid())
+	{
+		_BackgroundPoll->Stop();
+		_BackgroundPoll.Reset();
+	}
 
 	_Repository.Reset();
 	_Subprocess.Reset();
@@ -151,6 +158,14 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		*_PathToRepositoryRoot, *_BranchName, *_RemoteUrl, *_UserName, *_UserEmail,
 		_bLfsAvailable ? TEXT("yes") : TEXT("no"),
 		_LockableExtensions.Num());
+
+	// Start the background poll if the user has it enabled. This periodically fetches from
+	// origin and refreshes the file-status cache so the content browser stays current.
+	if (Settings != nullptr && Settings->bEnableBackgroundPoll && Settings->PollIntervalSeconds > 0)
+	{
+		_BackgroundPoll = MakeUnique<FGitLink_BackgroundPoll>(*this);
+		_BackgroundPoll->Start(static_cast<float>(Settings->PollIntervalSeconds));
+	}
 }
 
 // --------------------------------------------------------------------------------------------------------------------

@@ -11,6 +11,7 @@ namespace gitlink { class FRepository; }
 class FGitLink_StateCache;
 class FGitLink_CommandDispatcher;
 class FGitLink_Subprocess;
+class FGitLink_BackgroundPoll;
 
 // --------------------------------------------------------------------------------------------------------------------
 // FGitLink_Provider — libgit2-backed ISourceControlProvider.
@@ -152,6 +153,7 @@ private:
 	TUniquePtr<FGitLink_StateCache>        _StateCache;
 	TUniquePtr<FGitLink_CommandDispatcher> _Dispatcher;  // constructed empty in Pass B
 	TUniquePtr<FGitLink_Subprocess>        _Subprocess;  // present once a repo is open
+	TUniquePtr<FGitLink_BackgroundPoll>    _BackgroundPoll;
 
 	bool _bGitRepositoryFound = false;
 	bool _bLfsAvailable       = false;
