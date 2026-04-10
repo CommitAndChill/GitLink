@@ -50,4 +50,9 @@ namespace gitlink::op
 	// Reads user.name / user.email from git config (local repo first, then global). Returns a
 	// default-constructed FSignature on error (empty Name/Email).
 	GITLINKCORE_API auto Get_DefaultSignature(FRepository& InRepo) -> FSignature;
+
+	// --- Blob queries ---
+	// Returns the raw byte size of the blob at InRepoRelativePath in the commit InCommitHash.
+	// Returns 0 when the path doesn't exist in that commit or the commit can't be resolved.
+	GITLINKCORE_API auto Get_BlobSizeAtCommit(FRepository& InRepo, const FString& InCommitHash, const FString& InRepoRelativePath) -> int64;
 }

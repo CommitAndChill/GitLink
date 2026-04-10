@@ -11,6 +11,12 @@
 #include <Misc/Paths.h>
 #include <SourceControlOperations.h>
 
+// Forward declare the blob size op so we can populate FGitLink_Revision::_FileSize in history.
+namespace gitlink::op
+{
+	auto Get_BlobSizeAtCommit(gitlink::FRepository& InRepo, const FString& InCommitHash, const FString& InRepoRelativePath) -> int64;
+}
+
 // --------------------------------------------------------------------------------------------------------------------
 // Cmd_UpdateStatus — translates gitlink::FStatus into FGitLink_FileState entries merged into
 // the provider's cache. This is THE command that drives every content-browser icon + source
@@ -178,17 +184,18 @@ namespace gitlink::cmd
 		{
 			FGitLink_History History;
 
-			FString RelativePath = InAbsoluteFilename;
-			if (!InCtx.RepoRootAbsolute.IsEmpty() && RelativePath.StartsWith(InCtx.RepoRootAbsolute))
-			{
-				RelativePath.RightChopInline(InCtx.RepoRootAbsolute.Len(), EAllowShrinking::No);
-			}
-			// libgit2 wants forward slashes in tree paths regardless of platform.
-			RelativePath.ReplaceInline(TEXT("\\"), TEXT("/"));
-			RelativePath.RemoveFromStart(TEXT("/"));
+			const FString RelativePath = ToRepoRelativePath(InCtx.RepoRootAbsolute, InAbsoluteFilename);
 
 			if (RelativePath.IsEmpty() || InCtx.Repository == nullptr)
-			{ return History; }
+			{
+				UE_LOG(LogGitLink, Warning,
+					TEXT("BuildHistory: could not derive relative path for '%s' (repoRoot='%s')"),
+					*InAbsoluteFilename, *InCtx.RepoRootAbsolute);
+				return History;
+			}
+
+			UE_LOG(LogGitLink, Verbose,
+				TEXT("BuildHistory: '%s' -> relative '%s'"), *InAbsoluteFilename, *RelativePath);
 
 			FLogQuery Query;
 			Query.PathFilter = RelativePath;
@@ -211,6 +218,15 @@ namespace gitlink::cmd
 				Rev->_Date              = Commit.Author.When;
 				Rev->_RevisionNumber    = RevNumber--;
 				Rev->_CheckInIdentifier = Rev->_RevisionNumber;
+
+				// Populate file size from the blob at this commit. Costs one tree-lookup +
+				// blob-lookup per revision but makes the History dialog show real sizes.
+				if (InCtx.Repository != nullptr)
+				{
+					Rev->_FileSize = static_cast<int32>(
+						gitlink::op::Get_BlobSizeAtCommit(*InCtx.Repository, Commit.Hash, RelativePath));
+				}
+
 				History.Add(Rev);
 			}
 

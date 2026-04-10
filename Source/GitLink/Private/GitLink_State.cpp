@@ -212,11 +212,17 @@ auto FGitLink_FileState::CanCheckout() const -> bool
 {
 	// "Checkout" in Unreal source control == acquire an LFS lock.
 	//
-	// We return true when the file is LFS-lockable (Lock == NotLocked, as set by
-	// Cmd_Connect/Cmd_UpdateStatus after .gitattributes probing) AND it's not already locked
-	// by us (Locked) or by someone else (LockedOther). Non-lockable files are marked
-	// Unlockable at status population time and fall through to false here.
-	return _State.Lock == EGitLink_LockState::NotLocked;
+	// Permissive policy: allow checkout unless we positively know the file is unlockable or
+	// already locked. Files that haven't been fully queried yet (Lock == Unknown or Unset) are
+	// given the benefit of the doubt — Cmd_CheckOut will filter to lockable extensions before
+	// actually calling git-lfs, so non-lockable files won't accidentally get locked.
+	//
+	// This solves the case where the editor queries a file that wasn't in the initial
+	// Cmd_Connect cache (e.g. created/modified after connect) — the default state has
+	// Lock == Unknown, and we don't want the checkout button greyed out for those.
+	return _State.Lock != EGitLink_LockState::Unlockable
+	    && _State.Lock != EGitLink_LockState::Locked
+	    && _State.Lock != EGitLink_LockState::LockedOther;
 }
 
 auto FGitLink_FileState::IsCheckedOut() const -> bool
