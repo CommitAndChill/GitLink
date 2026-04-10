@@ -127,6 +127,7 @@ public:
 	// True when LFS is installed (git lfs version succeeded at connect time) AND the user
 	// has bUseLfsLocking enabled in the plugin settings. Drives UsesCheckout().
 	auto Is_LfsAvailable() const -> bool { return _bLfsAvailable; }
+	auto NeedsSubprocessForCommit() const -> bool { return _bHasPreCommitOrCommitMsgHook; }
 
 	// True when the file's extension matches a wildcard from .gitattributes marked with the
 	// 'lockable' attribute. Populated once at connect time by probing via
@@ -155,8 +156,9 @@ private:
 	TUniquePtr<FGitLink_Subprocess>        _Subprocess;  // present once a repo is open
 	TUniquePtr<FGitLink_BackgroundPoll>    _BackgroundPoll;
 
-	bool _bGitRepositoryFound = false;
-	bool _bLfsAvailable       = false;
+	bool _bGitRepositoryFound          = false;
+	bool _bLfsAvailable                = false;
+	bool _bHasPreCommitOrCommitMsgHook = false;  // from HookProbe at connect time
 
 	// Extensions marked 'lockable' via .gitattributes. Populated at Connect time by running
 	// `git check-attr lockable *.uasset *.umap ...`. Each entry includes the leading dot.
