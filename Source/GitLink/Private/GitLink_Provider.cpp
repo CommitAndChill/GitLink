@@ -5,6 +5,7 @@
 #include "GitLink_ChangelistState.h"
 #include "GitLink_StateCache.h"
 #include "GitLink_BackgroundPoll.h"
+#include "GitLink_HookProbe.h"
 #include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 #include "Slate/SGitLink_Settings.h"
@@ -158,6 +159,13 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		*_PathToRepositoryRoot, *_BranchName, *_RemoteUrl, *_UserName, *_UserEmail,
 		_bLfsAvailable ? TEXT("yes") : TEXT("no"),
 		_LockableExtensions.Num());
+
+	// Probe for git hooks so we know whether to route commits through the subprocess.
+	if (Settings != nullptr && Settings->bSubprocessFallbackForHooks)
+	{
+		const FGitLink_HookFlags HookFlags = FGitLink_HookProbe::Probe(_PathToRepositoryRoot);
+		_bHasPreCommitOrCommitMsgHook = HookFlags.NeedsSubprocessForCommit();
+	}
 
 	// Start the background poll if the user has it enabled. This periodically fetches from
 	// origin and refreshes the file-status cache so the content browser stays current.

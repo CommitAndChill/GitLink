@@ -49,14 +49,52 @@ namespace gitlink::cmd
 			}
 		}
 
-		gitlink::FCommitParams Params;
-		Params.Message = Description.ToString();
-		// AuthorName / AuthorEmail left blank -> op::CreateCommit uses git_signature_default
+		// Two commit paths:
+		//   A. Subprocess (git.exe): when the repo has pre-commit or commit-msg hooks, because
+		//      libgit2 silently skips all hooks and the user expects them to run. This path
+		//      shells out to `git commit -m "..."` which runs the hooks natively.
+		//   B. In-process (libgit2): the fast default when no hooks are present.
+		//
+		// The setting bSubprocessFallbackForHooks gates path A entirely; if disabled, all
+		// commits go through libgit2 regardless of hooks. That's the user's choice — they
+		// accept that hooks won't run but get the speed benefit.
+		const bool bUseSubprocess =
+			InCtx.Provider.NeedsSubprocessForCommit() &&
+			InCtx.Subprocess != nullptr &&
+			InCtx.Subprocess->IsValid();
 
-		const FResult CommitRes = InCtx.Repository->Commit(Params);
-		if (!CommitRes)
+		if (bUseSubprocess)
 		{
-			return FCommandResult::Fail(FText::FromString(CommitRes.ErrorMessage));
+			// Subprocess commit. The stage step above used libgit2 (fast, in-process), and
+			// now we shell out to git.exe for the commit itself so hooks run.
+			TArray<FString> CommitArgs;
+			CommitArgs.Add(TEXT("commit"));
+			CommitArgs.Add(TEXT("-m"));
+			CommitArgs.Add(Description.ToString());
+
+			const FGitLink_SubprocessResult SubResult = InCtx.Subprocess->Run(CommitArgs);
+			if (!SubResult.IsSuccess())
+			{
+				return FCommandResult::Fail(FText::Format(
+					LOCTEXT("SubprocessCommitFailed", "GitLink: git commit (subprocess) failed: {0}"),
+					FText::FromString(SubResult.Get_CombinedError())));
+			}
+
+			UE_LOG(LogGitLink, Log,
+				TEXT("Cmd_CheckIn: committed via subprocess (hooks ran): %s"),
+				*SubResult.StdOut.TrimStartAndEnd());
+		}
+		else
+		{
+			// In-process commit via libgit2 (fast, no hook execution).
+			gitlink::FCommitParams Params;
+			Params.Message = Description.ToString();
+
+			const FResult CommitRes = InCtx.Repository->Commit(Params);
+			if (!CommitRes)
+			{
+				return FCommandResult::Fail(FText::FromString(CommitRes.ErrorMessage));
+			}
 		}
 
 		// Release any LFS locks we held on the committed files so they're free for the next
