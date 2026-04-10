@@ -52,12 +52,25 @@ namespace gitlink::cmd
 
 	// Convert an absolute file path to a repo-relative, forward-slash path suitable for passing
 	// to git / git-lfs commands (both of which expect forward slashes regardless of platform).
+	// Uses case-insensitive prefix stripping because Windows paths can differ in casing between
+	// the repo root discovered by libgit2 and the paths the editor hands us.
 	inline auto ToRepoRelativePath(const FString& InRepoRootAbsolute, const FString& InAbsolute) -> FString
 	{
-		FString Rel = InAbsolute;
-		if (!InRepoRootAbsolute.IsEmpty() && Rel.StartsWith(InRepoRootAbsolute))
+		FString NormAbs = InAbsolute;
+		FPaths::NormalizeFilename(NormAbs);
+
+		FString NormRoot = InRepoRootAbsolute;
+		FPaths::NormalizeFilename(NormRoot);
+		// Ensure trailing slash so the chop doesn't leave a leading '/' on the relative path.
+		if (!NormRoot.EndsWith(TEXT("/")))
 		{
-			Rel.RightChopInline(InRepoRootAbsolute.Len(), EAllowShrinking::No);
+			NormRoot += TEXT("/");
+		}
+
+		FString Rel = NormAbs;
+		if (!NormRoot.IsEmpty() && Rel.StartsWith(NormRoot, ESearchCase::IgnoreCase))
+		{
+			Rel.RightChopInline(NormRoot.Len(), EAllowShrinking::No);
 		}
 		Rel.ReplaceInline(TEXT("\\"), TEXT("/"));
 		Rel.RemoveFromStart(TEXT("/"));
