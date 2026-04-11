@@ -237,8 +237,10 @@ namespace gitlink::cmd
 			History.Reserve(Commits.Num());
 
 			int32 RevNumber = Commits.Num();
-			for (const FCommit& Commit : Commits)
+			for (int32 Idx = 0; Idx < Commits.Num(); ++Idx)
 			{
+				const FCommit& Commit = Commits[Idx];
+
 				TSharedRef<FGitLink_Revision, ESPMode::ThreadSafe> Rev =
 					MakeShared<FGitLink_Revision, ESPMode::ThreadSafe>();
 				Rev->_Filename          = InAbsoluteFilename;
@@ -246,10 +248,16 @@ namespace gitlink::cmd
 				Rev->_ShortCommitId     = Commit.ShortHash;
 				Rev->_Description       = Commit.Summary.IsEmpty() ? Commit.Message : Commit.Summary;
 				Rev->_UserName          = Commit.Author.Name;
-				Rev->_Action            = TEXT("Changed");
 				Rev->_Date              = Commit.Author.When;
 				Rev->_RevisionNumber    = RevNumber--;
-				Rev->_CheckInIdentifier = Rev->_RevisionNumber;
+
+				// Match GitSourceControl: ChangeList column shows the numeric value of
+				// the 8-char short commit hash, not a sequential revision number.
+				Rev->_CheckInIdentifier = static_cast<int32>(
+					FCString::Strtoui64(*Commit.ShortHash, nullptr, 16));
+
+				// Last entry in history = first commit that introduced the file.
+				Rev->_Action = (Idx == Commits.Num() - 1) ? TEXT("add") : TEXT("modified");
 
 				// Populate file size from the blob at this commit.
 				Rev->_FileSize = static_cast<int32>(
