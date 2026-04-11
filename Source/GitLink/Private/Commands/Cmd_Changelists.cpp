@@ -75,10 +75,19 @@ namespace gitlink::cmd
 		const TArray<FGitLink_FileStateRef> AllFiles = InCtx.StateCache.Enumerate_FileStates(
 			[](const FGitLink_FileStateRef& /*State*/) { return true; });
 
+		// Content directory suffix — only files under a /Content/ directory are shown in
+		// View Changes, matching the existing GitSourceControl plugin's behaviour. This
+		// filters out source code, config, submodule dirs, .claude/, etc.
+		const FString ContentPathSegment = TEXT("/Content/");
+
 		for (const FGitLink_FileStateRef& FileState : AllFiles)
 		{
 			const EGitLink_TreeState Tree = FileState->_State.Tree;
 			const EGitLink_FileState File = FileState->_State.File;
+
+			// Only show files under a Content/ directory.
+			if (!FileState->GetFilename().Contains(ContentPathSegment))
+			{ continue; }
 
 			// Skip clean / non-repo files — they don't belong in any changelist.
 			if (Tree == EGitLink_TreeState::Unmodified ||
