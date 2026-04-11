@@ -4,6 +4,8 @@
 #include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 
+#include <HAL/PlatformFileManager.h>
+
 #define LOCTEXT_NAMESPACE "GitLinkCmdCheckOut"
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -85,18 +87,43 @@ namespace gitlink::cmd
 		const FGitLink_SubprocessResult LockResult = InCtx.Subprocess->RunLfs(LockArgs);
 		if (!LockResult.IsSuccess())
 		{
-			const FText Err = FText::Format(
-				LOCTEXT("LockFailed", "GitLink: git lfs lock failed: {0}"),
-				FText::FromString(LockResult.Get_CombinedError()));
+			// "Lock exists" means WE already hold the lock — that's the desired end state,
+			// so treat it as success. The editor re-runs checkout after a Cmd_Connect
+			// reconnect, and we don't want to fail just because we're already locked.
+			const FString ErrStr = LockResult.Get_CombinedError();
+			const bool bAlreadyLockedByUs = ErrStr.Contains(TEXT("Lock exists"));
 
-			UE_LOG(LogGitLink, Warning, TEXT("%s"), *Err.ToString());
-			return FCommandResult::Fail(Err);
+			if (bAlreadyLockedByUs)
+			{
+				UE_LOG(LogGitLink, Log,
+					TEXT("Cmd_CheckOut: file(s) already locked by us, treating as success"));
+			}
+			else
+			{
+				const FText Err = FText::Format(
+					LOCTEXT("LockFailed", "GitLink: git lfs lock failed: {0}"),
+					FText::FromString(ErrStr));
+
+				UE_LOG(LogGitLink, Warning, TEXT("%s"), *Err.ToString());
+				return FCommandResult::Fail(Err);
+			}
 		}
 
 		UE_LOG(LogGitLink, Log,
 			TEXT("Cmd_CheckOut: locked %d LFS file(s) as '%s'"),
 			LockableAbsolute.Num(),
 			*InCtx.Provider.Get_UserName());
+
+		// Clear the read-only flag on each locked file so the editor can save to it
+		// without showing the "Make Writable" prompt. This matches Perforce/SVN behavior
+		// where "Check Out" == "make writable + acquire exclusive edit rights".
+		for (const FString& Absolute : LockableAbsolute)
+		{
+			if (FPaths::FileExists(Absolute))
+			{
+				FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*Absolute, false);
+			}
+		}
 
 		// Emit predictive Locked states for every file we just locked. The editor will
 		// re-query status and see IsCheckedOut() == true.
