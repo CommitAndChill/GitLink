@@ -157,10 +157,15 @@ auto FGitLink_CommandDispatcher::Execute_AndComplete(
 		]() mutable
 		{
 			// Merge updated states into the provider's cache.
-			const bool bHadStateUpdates = Result.UpdatedStates.Num() > 0;
+			const bool bHadStateUpdates =
+				Result.UpdatedStates.Num() > 0 || Result.UpdatedChangelistStates.Num() > 0;
 			for (const FGitLink_FileStateRef& State : Result.UpdatedStates)
 			{
 				_Owner.Get_StateCache().Set_FileState(State->GetFilename(), State);
+			}
+			for (const FGitLink_ChangelistStateRef& ClState : Result.UpdatedChangelistStates)
+			{
+				_Owner.Get_StateCache().Set_ChangelistState(ClState->_Changelist, ClState);
 			}
 
 			// Log any info / error messages the command produced.

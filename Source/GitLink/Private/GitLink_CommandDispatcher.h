@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GitLink/GitLink_State.h"
+#include "GitLink_ChangelistState.h"
 
 #include <CoreMinimal.h>
 #include <ISourceControlProvider.h>
@@ -50,6 +51,10 @@ namespace gitlink::cmd
 		// State deltas to merge into the cache on the game thread. Commands populate this on
 		// their worker thread; the dispatcher applies it when the result comes back.
 		TArray<FGitLink_FileStateRef> UpdatedStates;
+
+		// Changelist state deltas — populated by Cmd_UpdateChangelistsStatus to tell the
+		// dispatcher which files belong to which changelist (View Changes window).
+		TArray<FGitLink_ChangelistStateRef> UpdatedChangelistStates;
 
 		static auto Ok() -> FCommandResult
 		{
