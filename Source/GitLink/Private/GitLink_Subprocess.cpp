@@ -2,7 +2,9 @@
 
 #include "GitLinkLog.h"
 
+#include <HAL/FileManager.h>
 #include <HAL/PlatformProcess.h>
+#include <Misc/FileHelper.h>
 #include <Misc/Paths.h>
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -228,4 +230,91 @@ auto FGitLink_Subprocess::QueryLfsLocks_Local() -> TMap<FString, FString>
 	}
 
 	return Out;
+}
+
+auto FGitLink_Subprocess::RunToFile(const TArray<FString>& InArgs, const FString& InOutputFile,
+	const FString& InWorkingDirOverride) -> bool
+{
+	if (!IsValid())
+	{ return false; }
+
+	const FString ArgsStr = JoinArgs(InArgs);
+	const FString& WorkDir = InWorkingDirOverride.IsEmpty() ? _WorkingDirectory : InWorkingDirOverride;
+
+	UE_LOG(LogGitLink, Verbose,
+		TEXT("RunToFile: %s %s -> %s"), *_GitBinary, *ArgsStr, *InOutputFile);
+
+	// Create the process with piped stdout so we can capture binary output.
+	void* ReadPipe  = nullptr;
+	void* WritePipe = nullptr;
+	FPlatformProcess::CreatePipe(ReadPipe, WritePipe);
+
+	// CreateProc signature: (..., PipeWriteChild, PipeReadChild)
+	// PipeWriteChild = child's stdin (we don't need it → nullptr)
+	// PipeReadChild  = child's stdout (WritePipe end — child writes, we read from ReadPipe)
+	FProcHandle Proc = FPlatformProcess::CreateProc(
+		*_GitBinary,
+		*ArgsStr,
+		/*bLaunchDetached=*/ false,
+		/*bLaunchHidden=*/ true,
+		/*bLaunchReallyHidden=*/ true,
+		/*OutProcessID=*/ nullptr,
+		/*InPriority=*/ 0,
+		WorkDir.IsEmpty() ? nullptr : *WorkDir,
+		/*PipeWriteChild=*/ nullptr,
+		/*PipeReadChild=*/  WritePipe);
+
+	if (!Proc.IsValid())
+	{
+		FPlatformProcess::ClosePipe(ReadPipe, WritePipe);
+		UE_LOG(LogGitLink, Warning, TEXT("RunToFile: failed to spawn git"));
+		return false;
+	}
+
+	// Read binary data from the pipe into a byte array.
+	TArray<uint8> FileContent;
+	while (FPlatformProcess::IsProcRunning(Proc))
+	{
+		TArray<uint8> Chunk;
+		FPlatformProcess::ReadPipeToArray(ReadPipe, Chunk);
+		if (Chunk.Num() > 0)
+		{
+			FileContent.Append(Chunk);
+		}
+		FPlatformProcess::Sleep(0.01f);
+	}
+
+	// Read any remaining data after process exit.
+	{
+		TArray<uint8> Chunk;
+		FPlatformProcess::ReadPipeToArray(ReadPipe, Chunk);
+		if (Chunk.Num() > 0)
+		{
+			FileContent.Append(Chunk);
+		}
+	}
+
+	int32 ReturnCode = -1;
+	FPlatformProcess::GetProcReturnCode(Proc, &ReturnCode);
+	FPlatformProcess::CloseProc(Proc);
+	FPlatformProcess::ClosePipe(ReadPipe, WritePipe);
+
+	if (ReturnCode != 0)
+	{
+		UE_LOG(LogGitLink, Warning,
+			TEXT("RunToFile: git exited with code %d"), ReturnCode);
+		return false;
+	}
+
+	// Write to disk.
+	if (!FFileHelper::SaveArrayToFile(FileContent, *InOutputFile))
+	{
+		UE_LOG(LogGitLink, Warning,
+			TEXT("RunToFile: failed to write '%s' (%d bytes)"), *InOutputFile, FileContent.Num());
+		return false;
+	}
+
+	UE_LOG(LogGitLink, Verbose,
+		TEXT("RunToFile: wrote %d bytes to '%s'"), FileContent.Num(), *InOutputFile);
+	return true;
 }
