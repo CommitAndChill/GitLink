@@ -128,6 +128,12 @@ auto FGitLink_StateCache::Find_ChangelistState(const FGitLink_Changelist& InChan
 	return MakeShared<FGitLink_ChangelistState, ESPMode::ThreadSafe>(InChangelist);
 }
 
+auto FGitLink_StateCache::Set_ChangelistState(const FGitLink_Changelist& InChangelist, FGitLink_ChangelistStateRef InState) -> void
+{
+	FWriteScopeLock Write(_ChangelistStatesLock);
+	_ChangelistStates.Add(InChangelist, MoveTemp(InState));
+}
+
 auto FGitLink_StateCache::Enumerate_Changelists() const -> TArray<FGitLink_ChangelistStateRef>
 {
 	FReadScopeLock Read(_ChangelistStatesLock);

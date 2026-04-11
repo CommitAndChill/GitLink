@@ -44,6 +44,7 @@ public:
 
 	auto GetOrCreate_ChangelistState(const FGitLink_Changelist& InChangelist) -> FGitLink_ChangelistStateRef;
 	auto Find_ChangelistState(const FGitLink_Changelist& InChangelist) const -> FGitLink_ChangelistStateRef;
+	auto Set_ChangelistState(const FGitLink_Changelist& InChangelist, FGitLink_ChangelistStateRef InState) -> void;
 	auto Enumerate_Changelists() const -> TArray<FGitLink_ChangelistStateRef>;
 
 	// --- Ignore-force helpers ---
