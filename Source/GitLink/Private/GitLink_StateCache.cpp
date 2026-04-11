@@ -1,14 +1,31 @@
 #include "GitLink_StateCache.h"
 
+#include <Misc/Paths.h>
+
+namespace
+{
+	// Canonicalize a file path so lookups are case- and format-consistent.
+	// All commands store state with Normalize_AbsolutePath (ConvertRelativePathToFull +
+	// NormalizeFilename), so we apply the same transform on every cache key.
+	auto NormalizeKey(const FString& InPath) -> FString
+	{
+		FString Out = FPaths::ConvertRelativePathToFull(InPath);
+		FPaths::NormalizeFilename(Out);
+		return Out;
+	}
+}
+
 // --------------------------------------------------------------------------------------------------------------------
 // File states
 // --------------------------------------------------------------------------------------------------------------------
 auto FGitLink_StateCache::GetOrCreate_FileState(const FString& InFilename) -> FGitLink_FileStateRef
 {
+	const FString Key = NormalizeKey(InFilename);
+
 	// Fast path: read lock, look up existing.
 	{
 		FReadScopeLock Read(_FileStatesLock);
-		if (const FGitLink_FileStateRef* Existing = _FileStates.Find(InFilename))
+		if (const FGitLink_FileStateRef* Existing = _FileStates.Find(Key))
 		{ return *Existing; }
 	}
 
@@ -16,29 +33,33 @@ auto FGitLink_StateCache::GetOrCreate_FileState(const FString& InFilename) -> FG
 	FWriteScopeLock Write(_FileStatesLock);
 
 	// Re-check under the write lock in case another thread won the race.
-	if (const FGitLink_FileStateRef* Existing = _FileStates.Find(InFilename))
+	if (const FGitLink_FileStateRef* Existing = _FileStates.Find(Key))
 	{ return *Existing; }
 
-	FGitLink_FileStateRef New = MakeShared<FGitLink_FileState, ESPMode::ThreadSafe>(InFilename);
-	_FileStates.Add(InFilename, New);
+	FGitLink_FileStateRef New = MakeShared<FGitLink_FileState, ESPMode::ThreadSafe>(Key);
+	_FileStates.Add(Key, New);
 	return New;
 }
 
 auto FGitLink_StateCache::Find_FileState(const FString& InFilename) const -> FGitLink_FileStateRef
 {
+	const FString Key = NormalizeKey(InFilename);
+
 	FReadScopeLock Read(_FileStatesLock);
-	if (const FGitLink_FileStateRef* Existing = _FileStates.Find(InFilename))
+	if (const FGitLink_FileStateRef* Existing = _FileStates.Find(Key))
 	{ return *Existing; }
 
 	// Return a fresh default state for callers that don't care about distinguishing unknown
 	// from present. GetCachedStateByPredicate-style callers should use Enumerate instead.
-	return MakeShared<FGitLink_FileState, ESPMode::ThreadSafe>(InFilename);
+	return MakeShared<FGitLink_FileState, ESPMode::ThreadSafe>(Key);
 }
 
 auto FGitLink_StateCache::Set_FileState(const FString& InFilename, FGitLink_FileStateRef InState) -> void
 {
+	const FString Key = NormalizeKey(InFilename);
+
 	FWriteScopeLock Write(_FileStatesLock);
-	_FileStates.Add(InFilename, MoveTemp(InState));
+	_FileStates.Add(Key, MoveTemp(InState));
 }
 
 auto FGitLink_StateCache::Remove_FileState(const FString& InFilename) -> bool

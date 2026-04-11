@@ -222,7 +222,12 @@ auto FGitLink_Provider::GetState(
 	OutState.Reserve(InFiles.Num());
 	for (const FString& File : InFiles)
 	{
-		OutState.Add(_StateCache->GetOrCreate_FileState(File));
+		// Normalize the path the same way commands do when storing state — without this,
+		// the editor might query "D:/Repos/..." while the cache has it stored under a
+		// slightly different form (case, trailing slashes, relative vs absolute).
+		FString Normalized = FPaths::ConvertRelativePathToFull(File);
+		FPaths::NormalizeFilename(Normalized);
+		OutState.Add(_StateCache->GetOrCreate_FileState(Normalized));
 	}
 	return ECommandResult::Succeeded;
 }
