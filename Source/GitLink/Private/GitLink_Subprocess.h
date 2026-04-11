@@ -57,6 +57,11 @@ public:
 	// can do direct FString::EndsWith comparisons.
 	auto ProbeLockableExtensions(const TArray<FString>& InWildcards) -> TArray<FString>;
 
+	// Queries LFS locks held by the current user via `git lfs locks --local`.
+	// Returns a map of repo-relative paths (forward-slashed) to the lock owner name.
+	// On failure (LFS not available, network error), returns an empty map.
+	auto QueryLfsLocks_Local() -> TMap<FString, FString>;
+
 private:
 	FString _GitBinary;
 	FString _WorkingDirectory;
