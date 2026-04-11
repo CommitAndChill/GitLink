@@ -249,6 +249,17 @@ namespace gitlink::cmd
 				? EGitLink_LockState::NotLocked
 				: EGitLink_LockState::Unlockable;
 
+			// Assign to a changelist so View Changes knows where this file belongs.
+			if (InComposite.Tree == EGitLink_TreeState::Staged)
+			{
+				State->_Changelist = FGitLink_Changelist::StagedChangelist;
+			}
+			else if (InComposite.Tree == EGitLink_TreeState::Working ||
+					 InComposite.Tree == EGitLink_TreeState::Untracked)
+			{
+				State->_Changelist = FGitLink_Changelist::WorkingChangelist;
+			}
+
 			if (bUpdateHistory)
 			{
 				State->_History = BuildHistory(InFilename);
