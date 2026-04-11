@@ -326,7 +326,10 @@ auto FGitLink_FileState::IsConflicted() const -> bool
 
 auto FGitLink_FileState::CanRevert() const -> bool
 {
-	return IsModified();
+	// A file can be reverted if it has local modifications (the usual case) OR if it's
+	// locked by us but not yet modified — reverting a locked-but-clean file releases the
+	// LFS lock, which is the only way to "un-checkout" in a locking-based workflow.
+	return IsModified() || _State.Lock == EGitLink_LockState::Locked;
 }
 
 #undef LOCTEXT_NAMESPACE

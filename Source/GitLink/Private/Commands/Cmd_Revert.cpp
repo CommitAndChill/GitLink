@@ -3,6 +3,8 @@
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
 
+#include <HAL/PlatformFileManager.h>
+
 #define LOCTEXT_NAMESPACE "GitLinkCmdRevert"
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -37,25 +39,79 @@ namespace gitlink::cmd
 			return FCommandResult::Ok();
 		}
 
-		// First drop any index entries (handles newly-added files that have nothing in HEAD).
-		// Tolerate errors on this one — an "unstaging" attempt for a file that wasn't staged in
-		// the first place is harmless.
-		const FResult UnstageRes = InCtx.Repository->Unstage(InFiles);
-		if (!UnstageRes)
+		// Separate files into two buckets: those with local modifications that need a
+		// discard, and those that are only locked (checkout) but not yet modified on disk.
+		// The latter case only needs an LFS unlock — no git index/working-tree work.
+		TArray<FString> ModifiedFiles;
+		TArray<FString> LockedOnlyFiles;
+		ModifiedFiles.Reserve(InFiles.Num());
+		LockedOnlyFiles.Reserve(InFiles.Num());
+
+		for (const FString& File : InFiles)
 		{
-			// Not fatal — proceed to DiscardChanges which is the main operation.
+			const FGitLink_FileStateRef State = InCtx.StateCache.Find_FileState(File);
+			const bool bIsModified =
+				   State->_State.File == EGitLink_FileState::Added
+				|| State->_State.File == EGitLink_FileState::Deleted
+				|| State->_State.File == EGitLink_FileState::Modified
+				|| State->_State.File == EGitLink_FileState::Renamed
+				|| State->_State.File == EGitLink_FileState::Unmerged;
+
+			if (bIsModified)
+			{
+				ModifiedFiles.Add(File);
+			}
+			else if (State->_State.Lock == EGitLink_LockState::Locked)
+			{
+				LockedOnlyFiles.Add(File);
+			}
+			else
+			{
+				// Neither modified nor locked — nothing to revert. Still emit a clean state
+				// so the editor refreshes.
+				ModifiedFiles.Add(File);  // let the discard handle it, it's harmless
+			}
 		}
 
-		const FResult DiscardRes = InCtx.Repository->DiscardChanges(InFiles);
-		if (!DiscardRes)
+		// Discard changes for files that have actual modifications.
+		if (!ModifiedFiles.IsEmpty())
 		{
-			return FCommandResult::Fail(FText::FromString(DiscardRes.ErrorMessage));
+			// Convert to repo-relative paths — libgit2's git_checkout_head pathspec and
+			// git_reset_default both expect paths relative to the repo root, not absolute.
+			TArray<FString> RelativeModified;
+			RelativeModified.Reserve(ModifiedFiles.Num());
+			for (const FString& Abs : ModifiedFiles)
+			{
+				RelativeModified.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, Abs));
+			}
+
+			// First drop any index entries (handles newly-added files that have nothing in HEAD).
+			const FResult UnstageRes = InCtx.Repository->Unstage(RelativeModified);
+			if (!UnstageRes)
+			{
+				// Not fatal — proceed to DiscardChanges which is the main operation.
+			}
+
+			const FResult DiscardRes = InCtx.Repository->DiscardChanges(RelativeModified);
+			if (!DiscardRes)
+			{
+				return FCommandResult::Fail(FText::FromString(DiscardRes.ErrorMessage));
+			}
 		}
 
-		// Release any LFS locks we held on the reverted files — since we just threw away
-		// local changes, there's no reason to hold the exclusive edit lock anymore. Best-
-		// effort: non-lockable or non-locked files are skipped silently.
+		// Release any LFS locks we held on ALL reverted files — both modified and locked-only.
+		// Since we just threw away local changes (or had none), there's no reason to hold the
+		// exclusive edit lock anymore.
 		Release_LfsLocksBestEffort(InCtx, InFiles);
+
+		// Restore read-only flag on reverted files to match the un-checked-out state.
+		for (const FString& File : InFiles)
+		{
+			if (InCtx.Provider.Is_FileLockable(File) && FPaths::FileExists(File))
+			{
+				FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*File, true);
+			}
+		}
 
 		FCommandResult Result = FCommandResult::Ok();
 		Result.UpdatedStates.Reserve(InFiles.Num());
