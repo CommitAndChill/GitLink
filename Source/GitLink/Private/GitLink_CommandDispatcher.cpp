@@ -96,8 +96,9 @@ auto FGitLink_CommandDispatcher::Dispatch(
 
 	if (InConcurrency == EConcurrency::Synchronous)
 	{
-		Execute_AndComplete(MoveTemp(HandlerCopy), InOperation, InFiles, InCompleteDelegate);
-		return ECommandResult::Succeeded;
+		const ECommandResult::Type SyncResult =
+			Execute_AndComplete(MoveTemp(HandlerCopy), InOperation, InFiles, InCompleteDelegate);
+		return SyncResult;
 	}
 
 	// Async: run on a task-graph thread and let Execute_AndComplete marshal the completion back
@@ -122,7 +123,7 @@ auto FGitLink_CommandDispatcher::Execute_AndComplete(
 	gitlink::cmd::FCommandFn        InHandler,
 	FSourceControlOperationRef      InOperation,
 	TArray<FString>                 InFiles,
-	FSourceControlOperationComplete InCompleteDelegate) -> void
+	FSourceControlOperationComplete InCompleteDelegate) -> ECommandResult::Type
 {
 	// Build the context snapshotting what the handler needs, so it doesn't have to touch provider
 	// internals while running.
@@ -141,6 +142,8 @@ auto FGitLink_CommandDispatcher::Execute_AndComplete(
 		// exception handling in UE code, so a bug would terminate, which is what we want.
 		Result = InHandler(Ctx, InOperation, InFiles);
 	}
+
+	const bool bCommandOk = Result.bOk;
 
 	// Merge state deltas and fire the completion delegate on the game thread, regardless of
 	// which thread we ran on. ExecuteOnGameThread_WhenReady handles the "already on game thread"
@@ -194,6 +197,8 @@ auto FGitLink_CommandDispatcher::Execute_AndComplete(
 	{
 		AsyncTask(ENamedThreads::GameThread, MoveTemp(ApplyOnGameThread));
 	}
+
+	return bCommandOk ? ECommandResult::Succeeded : ECommandResult::Failed;
 }
 
 auto FGitLink_CommandDispatcher::CanCancel(const FSourceControlOperationRef& /*InOperation*/) const -> bool

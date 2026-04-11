@@ -104,7 +104,7 @@ private:
 		gitlink::cmd::FCommandFn          InHandler,
 		FSourceControlOperationRef        InOperation,
 		TArray<FString>                   InFiles,
-		FSourceControlOperationComplete   InCompleteDelegate) -> void;
+		FSourceControlOperationComplete   InCompleteDelegate) -> ECommandResult::Type;
 
 	FGitLink_Provider& _Owner;
 	TMap<FName, gitlink::cmd::FCommandFn> _Handlers;
