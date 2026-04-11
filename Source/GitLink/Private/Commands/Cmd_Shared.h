@@ -41,11 +41,12 @@ namespace gitlink::cmd
 		return Make_FileState(InAbsoluteFilename, Composite);
 	}
 
-	// Normalize a user-supplied path (usually absolute, sometimes with backslashes on Windows)
-	// for comparison with libgit2's relative paths. Matches what Cmd_UpdateStatus does.
+	// Normalize a user-supplied path to an absolute, forward-slashed form. The editor sometimes
+	// passes relative paths (relative to Engine/Binaries/Win64/) so we must ConvertRelativePathToFull
+	// before any repo-root prefix stripping or comparison.
 	inline auto Normalize_AbsolutePath(const FString& InPath) -> FString
 	{
-		FString Out = InPath;
+		FString Out = FPaths::ConvertRelativePathToFull(InPath);
 		FPaths::NormalizeFilename(Out);
 		return Out;
 	}
@@ -56,7 +57,7 @@ namespace gitlink::cmd
 	// the repo root discovered by libgit2 and the paths the editor hands us.
 	inline auto ToRepoRelativePath(const FString& InRepoRootAbsolute, const FString& InAbsolute) -> FString
 	{
-		FString NormAbs = InAbsolute;
+		FString NormAbs = FPaths::ConvertRelativePathToFull(InAbsolute);
 		FPaths::NormalizeFilename(NormAbs);
 
 		FString NormRoot = InRepoRootAbsolute;
