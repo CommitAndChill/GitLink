@@ -117,24 +117,15 @@ namespace gitlink::cmd
 		if (RelativePaths.IsEmpty())
 		{ return true; }  // nothing to unlock
 
-		// Query lock IDs for the files we want to unlock. Unlocking by --id is more
-		// reliable than by path because it avoids the "admin access" error that occurs
-		// when the LFS server's owner identity (e.g. GitHub username) differs from the
-		// git config user.name. The --id form lets the server validate ownership via
-		// the auth token directly.
-		const TMap<FString, FString> LocalLocks = InCtx.Subprocess->QueryLfsLocks_Local();
-
 		bool bAllOk = true;
 		int32 UnlockedCount = 0;
 
 		for (const FString& RelPath : RelativePaths)
 		{
-			// Find the lock ID for this file. QueryLfsLocks_Local returns path->owner,
-			// but we need the ID. Fall back to path-based unlock if we can't find it.
-			// We need to re-query with --json or parse the ID from the output.
-			// For now, try --id from a fresh locks query, falling back to path.
-
-			// Try path-based unlock first (works when identities match).
+			// Try path-based unlock first (works when git user identity matches the
+			// LFS server's lock owner). Falls back to --id unlock when the server
+			// rejects --force due to identity mismatch (e.g. GitHub username differs
+			// from git config user.name).
 			TArray<FString> UnlockArgs = { TEXT("unlock"), TEXT("--force"), RelPath };
 			FGitLink_SubprocessResult Result = InCtx.Subprocess->RunLfs(UnlockArgs);
 
