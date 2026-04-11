@@ -256,7 +256,9 @@ auto FGitLink_Provider::GetState(
 		// parent repo. Mark them as Unlockable + Unmodified so all action predicates
 		// (CanCheckout, CanCheckIn, CanRevert, CanAdd) return false while
 		// IsSourceControlled returns true. History still works via submodule repo open.
-		if (State->_State.Lock == EGitLink_LockState::Unknown && Is_InSubmodule(Normalized))
+		// Always stamp on every GetState call — submodule paths may not be populated
+		// during early init, so a previous query might have left Lock=Unknown.
+		if (Is_InSubmodule(Normalized))
 		{
 			State->_State.Lock = EGitLink_LockState::Unlockable;
 			if (State->_State.Tree == EGitLink_TreeState::NotInRepo ||
