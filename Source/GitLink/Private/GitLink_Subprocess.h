@@ -62,6 +62,12 @@ public:
 	// On failure (LFS not available, network error), returns an empty map.
 	auto QueryLfsLocks_Local() -> TMap<FString, FString>;
 
+	// Runs `git <args>` and writes stdout (binary-safe) to InOutputFile.
+	// Used by FGitLink_Revision::Get to extract file content at a specific commit.
+	// Returns true on success (exit code 0).
+	auto RunToFile(const TArray<FString>& InArgs, const FString& InOutputFile,
+		const FString& InWorkingDirOverride = FString()) -> bool;
+
 private:
 	FString _GitBinary;
 	FString _WorkingDirectory;
