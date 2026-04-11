@@ -180,28 +180,60 @@ namespace gitlink::cmd
 
 		// Populate an FGitLink_FileState::_History array by walking the log, path-filtered
 		// on the repo-relative path. Up to 100 revisions for v1.
+		//
+		// For files in submodules, we open the submodule's repo temporarily and query
+		// its log instead of the parent repo's (which has no history for those files).
 		auto BuildHistory = [&InCtx](const FString& InAbsoluteFilename) -> FGitLink_History
 		{
 			FGitLink_History History;
 
-			const FString RelativePath = ToRepoRelativePath(InCtx.RepoRootAbsolute, InAbsoluteFilename);
+			// Determine which repo to query and the relative path within it.
+			gitlink::FRepository* RepoToQuery = InCtx.Repository;
+			TUniquePtr<gitlink::FRepository> SubmoduleRepo;
+			FString RelativePath;
+			FString RepoRoot = InCtx.RepoRootAbsolute;
 
-			if (RelativePath.IsEmpty() || InCtx.Repository == nullptr)
+			const FString SubmoduleRoot = InCtx.Provider.Get_SubmoduleRoot(InAbsoluteFilename);
+			if (!SubmoduleRoot.IsEmpty())
+			{
+				// File is in a submodule — open the submodule's repo for history.
+				gitlink::FOpenParams SubParams;
+				SubParams.Path = SubmoduleRoot;
+				SubmoduleRepo = gitlink::FRepository::Open(SubParams);
+
+				if (SubmoduleRepo.IsValid())
+				{
+					RepoToQuery = SubmoduleRepo.Get();
+					RepoRoot    = SubmoduleRoot;
+				}
+				else
+				{
+					UE_LOG(LogGitLink, Warning,
+						TEXT("BuildHistory: could not open submodule repo at '%s'"), *SubmoduleRoot);
+					return History;
+				}
+			}
+
+			RelativePath = ToRepoRelativePath(RepoRoot, InAbsoluteFilename);
+
+			if (RelativePath.IsEmpty() || RepoToQuery == nullptr)
 			{
 				UE_LOG(LogGitLink, Warning,
 					TEXT("BuildHistory: could not derive relative path for '%s' (repoRoot='%s')"),
-					*InAbsoluteFilename, *InCtx.RepoRootAbsolute);
+					*InAbsoluteFilename, *RepoRoot);
 				return History;
 			}
 
 			UE_LOG(LogGitLink, Verbose,
-				TEXT("BuildHistory: '%s' -> relative '%s'"), *InAbsoluteFilename, *RelativePath);
+				TEXT("BuildHistory: '%s' -> relative '%s' (submodule=%s)"),
+				*InAbsoluteFilename, *RelativePath,
+				SubmoduleRoot.IsEmpty() ? TEXT("no") : TEXT("yes"));
 
 			FLogQuery Query;
 			Query.PathFilter = RelativePath;
 			Query.MaxCount   = 100;
 
-			const TArray<FCommit> Commits = InCtx.Repository->Get_Log(Query);
+			const TArray<FCommit> Commits = RepoToQuery->Get_Log(Query);
 			History.Reserve(Commits.Num());
 
 			int32 RevNumber = Commits.Num();
@@ -219,17 +251,14 @@ namespace gitlink::cmd
 				Rev->_RevisionNumber    = RevNumber--;
 				Rev->_CheckInIdentifier = Rev->_RevisionNumber;
 
-				// Populate file size from the blob at this commit. Costs one tree-lookup +
-				// blob-lookup per revision but makes the History dialog show real sizes.
-				if (InCtx.Repository != nullptr)
-				{
-					Rev->_FileSize = static_cast<int32>(
-						gitlink::op::Get_BlobSizeAtCommit(*InCtx.Repository, Commit.Hash, RelativePath));
-				}
+				// Populate file size from the blob at this commit.
+				Rev->_FileSize = static_cast<int32>(
+					gitlink::op::Get_BlobSizeAtCommit(*RepoToQuery, Commit.Hash, RelativePath));
 
 				History.Add(Rev);
 			}
 
+			// SubmoduleRepo destructs here, closing the handle automatically.
 			return History;
 		};
 

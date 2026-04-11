@@ -14,9 +14,14 @@
 #include "GitLinkCore/Repository/GitLink_Repository_Params.h"
 #include "GitLinkCore/Types/GitLink_Types.h"
 
+
 // Op_Signature declaration — no public header in GitLinkCore exposes it because it's primarily
 // an internal helper. Forward-declared here so the provider can call it.
-namespace gitlink::op { auto Get_DefaultSignature(gitlink::FRepository& InRepo) -> gitlink::FSignature; }
+namespace gitlink::op
+{
+	auto Get_DefaultSignature(gitlink::FRepository& InRepo) -> gitlink::FSignature;
+	auto Enumerate_SubmodulePaths(gitlink::FRepository& InRepo) -> TArray<FString>;
+}
 
 #include <Misc/Paths.h>
 #include <SourceControlOperations.h>
@@ -153,12 +158,29 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		_LockableExtensions = _Subprocess->ProbeLockableExtensions(Wildcards);
 	}
 
+	// Enumerate submodule paths so we can detect files that live in submodules.
+	// These files should not be checked out / checked in from the parent repo.
+	{
+		const TArray<FString> RelativeSubmodules = gitlink::op::Enumerate_SubmodulePaths(*_Repository);
+		_SubmodulePaths.Reset();
+		_SubmodulePaths.Reserve(RelativeSubmodules.Num());
+		for (const FString& RelPath : RelativeSubmodules)
+		{
+			FString AbsPath = FPaths::Combine(_PathToRepositoryRoot, RelPath);
+			FPaths::NormalizeFilename(AbsPath);
+			if (!AbsPath.EndsWith(TEXT("/")))
+			{ AbsPath += TEXT("/"); }
+			_SubmodulePaths.Add(MoveTemp(AbsPath));
+		}
+	}
+
 	UE_LOG(LogGitLink, Log,
 		TEXT("CheckRepositoryStatus: repo='%s' branch='%s' remote='%s' user='%s <%s>' ")
-		TEXT("lfs=%s lockable_exts=%d"),
+		TEXT("lfs=%s lockable_exts=%d submodules=%d"),
 		*_PathToRepositoryRoot, *_BranchName, *_RemoteUrl, *_UserName, *_UserEmail,
 		_bLfsAvailable ? TEXT("yes") : TEXT("no"),
-		_LockableExtensions.Num());
+		_LockableExtensions.Num(),
+		_SubmodulePaths.Num());
 
 	// Probe for git hooks so we know whether to route commits through the subprocess.
 	if (Settings != nullptr && Settings->bSubprocessFallbackForHooks)
@@ -227,7 +249,24 @@ auto FGitLink_Provider::GetState(
 		// slightly different form (case, trailing slashes, relative vs absolute).
 		FString Normalized = FPaths::ConvertRelativePathToFull(File);
 		FPaths::NormalizeFilename(Normalized);
-		OutState.Add(_StateCache->GetOrCreate_FileState(Normalized));
+
+		FGitLink_FileStateRef State = _StateCache->GetOrCreate_FileState(Normalized);
+
+		// Files inside submodules should not be checkable-out / checkable-in from the
+		// parent repo. Mark them as Unlockable + Unmodified so all action predicates
+		// (CanCheckout, CanCheckIn, CanRevert, CanAdd) return false while
+		// IsSourceControlled returns true. History still works via submodule repo open.
+		if (State->_State.Lock == EGitLink_LockState::Unknown && Is_InSubmodule(Normalized))
+		{
+			State->_State.Lock = EGitLink_LockState::Unlockable;
+			if (State->_State.Tree == EGitLink_TreeState::NotInRepo ||
+				State->_State.Tree == EGitLink_TreeState::Unset)
+			{
+				State->_State.Tree = EGitLink_TreeState::Unmodified;
+			}
+		}
+
+		OutState.Add(State);
 	}
 	return ECommandResult::Succeeded;
 }
@@ -497,6 +536,32 @@ auto FGitLink_Provider::Is_FileLockable(const FString& InAbsolutePath) const -> 
 		{ return true; }
 	}
 	return false;
+}
+
+auto FGitLink_Provider::Is_InSubmodule(const FString& InAbsolutePath) const -> bool
+{
+	FString Normalized = FPaths::ConvertRelativePathToFull(InAbsolutePath);
+	FPaths::NormalizeFilename(Normalized);
+
+	for (const FString& SubPath : _SubmodulePaths)
+	{
+		if (Normalized.StartsWith(SubPath, ESearchCase::IgnoreCase))
+		{ return true; }
+	}
+	return false;
+}
+
+auto FGitLink_Provider::Get_SubmoduleRoot(const FString& InAbsolutePath) const -> FString
+{
+	FString Normalized = FPaths::ConvertRelativePathToFull(InAbsolutePath);
+	FPaths::NormalizeFilename(Normalized);
+
+	for (const FString& SubPath : _SubmodulePaths)
+	{
+		if (Normalized.StartsWith(SubPath, ESearchCase::IgnoreCase))
+		{ return SubPath; }
+	}
+	return FString();
 }
 
 auto FGitLink_Provider::Broadcast_StateChanged() -> void

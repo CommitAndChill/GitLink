@@ -134,6 +134,14 @@ public:
 	// `git check-attr lockable *.uasset *.umap ...`.
 	auto Is_FileLockable(const FString& InAbsolutePath) const -> bool;
 
+	// True when the file lives inside a git submodule (e.g. Plugins/CkFoundation/).
+	// Submodule files should not be checked out / checked in from the parent repo.
+	auto Is_InSubmodule(const FString& InAbsolutePath) const -> bool;
+
+	// Returns the absolute path to the submodule root containing this file, or empty if
+	// the file is not in a submodule.
+	auto Get_SubmoduleRoot(const FString& InAbsolutePath) const -> FString;
+
 	auto Get_PathToRepositoryRoot() const -> const FString& { return _PathToRepositoryRoot; }
 	auto Get_UserName()             const -> const FString& { return _UserName; }
 	auto Get_UserEmail()            const -> const FString& { return _UserEmail; }
@@ -163,6 +171,11 @@ private:
 	// Extensions marked 'lockable' via .gitattributes. Populated at Connect time by running
 	// `git check-attr lockable *.uasset *.umap ...`. Each entry includes the leading dot.
 	TArray<FString> _LockableExtensions;
+
+	// Absolute paths to submodule working directories, populated at connect time via
+	// git_submodule_foreach. Used by Is_InSubmodule to detect files that should not
+	// be checked out / checked in from the parent repo.
+	TArray<FString> _SubmodulePaths;
 
 	FString _PathToRepositoryRoot;  // resolved working tree root
 	FString _UserName;

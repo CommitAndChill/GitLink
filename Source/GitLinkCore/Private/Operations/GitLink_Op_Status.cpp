@@ -214,4 +214,40 @@ namespace gitlink::op
 
 		return Out;
 	}
+
+	// ----------------------------------------------------------------------------------------------------------------
+	auto Enumerate_SubmodulePaths(FRepository& InRepo) -> TArray<FString>
+	{
+		TArray<FString> Out;
+
+#if WITH_LIBGIT2
+		if (!InRepo.IsOpen())
+		{ return Out; }
+
+		FScopeLock Lock(&InRepo.Get_Mutex());
+
+		git_submodule_foreach(
+			InRepo.Get_RawHandle(),
+			[](git_submodule* InSm, const char* /*InName*/, void* InPayload) -> int
+			{
+				TArray<FString>* Paths = static_cast<TArray<FString>*>(InPayload);
+				const char* Path = git_submodule_path(InSm);
+				if (Path != nullptr)
+				{
+					FString RelPath = UTF8_TO_TCHAR(Path);
+					RelPath.ReplaceInline(TEXT("\\"), TEXT("/"));
+					if (!RelPath.EndsWith(TEXT("/")))
+					{ RelPath += TEXT("/"); }
+					Paths->Add(MoveTemp(RelPath));
+				}
+				return 0;
+			},
+			&Out);
+
+		UE_LOG(LogGitLinkCore, Verbose,
+			TEXT("Enumerate_SubmodulePaths: %d submodule(s)"), Out.Num());
+#endif  // WITH_LIBGIT2
+
+		return Out;
+	}
 }
