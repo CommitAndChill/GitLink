@@ -26,6 +26,9 @@ namespace gitlink::op
 	// show up in the dirty-status snapshot.
 	GITLINKCORE_API auto Enumerate_TrackedFiles(FRepository& InRepo) -> TArray<FString>;
 
+	// Returns repo-relative paths (with trailing /) for every tracked submodule.
+	GITLINKCORE_API auto Enumerate_SubmodulePaths(FRepository& InRepo) -> TArray<FString>;
+
 	// --- Index manipulation ---
 	GITLINKCORE_API auto StagePaths     (FRepository& InRepo, const TArray<FString>& InPaths) -> FResult;
 	GITLINKCORE_API auto UnstagePaths   (FRepository& InRepo, const TArray<FString>& InPaths) -> FResult;
