@@ -181,3 +181,51 @@ auto FGitLink_Subprocess::ProbeLockableExtensions(const TArray<FString>& InWildc
 
 	return Out;
 }
+
+auto FGitLink_Subprocess::QueryLfsLocks_Local() -> TMap<FString, FString>
+{
+	TMap<FString, FString> Out;
+	if (!IsValid())
+	{ return Out; }
+
+	// `git lfs locks --local` lists locks held by the current user. Output format:
+	//   Content/Path/To/File.uasset	Neil Koo	ID:12345
+	// Tab-separated: path, owner, id.
+	const FGitLink_SubprocessResult Result = RunLfs({ TEXT("locks"), TEXT("--local") });
+	if (!Result.IsSuccess())
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("QueryLfsLocks_Local: git lfs locks --local failed: %s"),
+			*Result.Get_CombinedError());
+		return Out;
+	}
+
+	TArray<FString> Lines;
+	Result.StdOut.ParseIntoArrayLines(Lines, /*bCullEmpty=*/ true);
+
+	for (const FString& Line : Lines)
+	{
+		// Parse tab-separated fields. git-lfs uses tabs between columns.
+		FString Trimmed = Line.TrimStartAndEnd();
+		if (Trimmed.IsEmpty())
+		{ continue; }
+
+		// The output format is: <path>\t<owner>\t<id>
+		// But some versions use variable whitespace. Split on tab first.
+		TArray<FString> Parts;
+		Trimmed.ParseIntoArray(Parts, TEXT("\t"), /*bCullEmpty=*/ true);
+
+		if (Parts.Num() >= 2)
+		{
+			FString Path  = Parts[0].TrimStartAndEnd();
+			FString Owner = Parts[1].TrimStartAndEnd();
+
+			// Normalize to forward slashes
+			Path.ReplaceInline(TEXT("\\"), TEXT("/"));
+
+			Out.Add(MoveTemp(Path), MoveTemp(Owner));
+		}
+	}
+
+	return Out;
+}

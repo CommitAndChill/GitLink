@@ -141,6 +141,55 @@ namespace gitlink::cmd
 			if (bLockable) { ++LockableCount; }
 		}
 
+		// Stage 3: query existing LFS locks so reconnecting doesn't lose lock state.
+		// Without this, a reconnect after a successful checkout would reset Lock to NotLocked
+		// and the editor would try to check out again (failing with "Lock exists").
+		if (InCtx.Subprocess != nullptr && InCtx.Subprocess->IsValid() && InCtx.Provider.Is_LfsAvailable())
+		{
+			const TMap<FString, FString> LocalLocks = InCtx.Subprocess->QueryLfsLocks_Local();
+			const FString& CurrentUser = InCtx.Provider.Get_UserName();
+			int32 LockCount = 0;
+
+			for (const auto& [RelPath, LockOwner] : LocalLocks)
+			{
+				const FString Absolute = Normalize_AbsolutePath(
+					FPaths::Combine(InCtx.RepoRootAbsolute, RelPath));
+
+				// Find or create a state entry for this locked file.
+				bool bFound = false;
+				for (const FGitLink_FileStateRef& State : Result.UpdatedStates)
+				{
+					if (State->GetFilename().Equals(Absolute, ESearchCase::IgnoreCase))
+					{
+						State->_State.Lock     = EGitLink_LockState::Locked;
+						State->_State.LockUser = LockOwner;
+						bFound = true;
+						break;
+					}
+				}
+
+				if (!bFound)
+				{
+					// File is locked but wasn't in the dirty or tracked scan — add it.
+					FGitLink_CompositeState Composite;
+					Composite.File     = EGitLink_FileState::Unknown;
+					Composite.Tree     = EGitLink_TreeState::Unmodified;
+					Composite.Lock     = EGitLink_LockState::Locked;
+					Composite.LockUser = LockOwner;
+					Result.UpdatedStates.Add(Make_FileState(Absolute, Composite));
+				}
+
+				++LockCount;
+			}
+
+			if (LockCount > 0)
+			{
+				UE_LOG(LogGitLink, Log,
+					TEXT("Cmd_Connect: discovered %d existing LFS lock(s) held locally"),
+					LockCount);
+			}
+		}
+
 		UE_LOG(LogGitLink, Log,
 			TEXT("Cmd_Connect: initial state cache = %d dirty + %d unmodified-tracked file(s) ")
 			TEXT("(%d lockable)"),
