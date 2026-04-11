@@ -252,9 +252,9 @@ namespace gitlink::cmd
 				Rev->_RevisionNumber    = RevNumber--;
 
 				// Match GitSourceControl: ChangeList column shows the numeric value of
-				// the 8-char short commit hash, not a sequential revision number.
+				// the first 8 hex chars of the commit hash.
 				Rev->_CheckInIdentifier = static_cast<int32>(
-					FCString::Strtoui64(*Commit.ShortHash, nullptr, 16));
+					FCString::Strtoui64(*Commit.Hash.Left(8), nullptr, 16));
 
 				// Last entry in history = first commit that introduced the file.
 				Rev->_Action = (Idx == Commits.Num() - 1) ? TEXT("add") : TEXT("modified");
