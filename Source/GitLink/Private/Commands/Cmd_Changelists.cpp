@@ -1,8 +1,10 @@
+#include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
-#include "GitLink_StateCache.h"
 #include "GitLinkLog.h"
 
 #include "GitLink/GitLink_Changelist.h"
+
+#include "GitLinkCore/Repository/GitLink_Repository.h"
 
 #define LOCTEXT_NAMESPACE "GitLinkCmdChangelists"
 
@@ -64,70 +66,82 @@ namespace gitlink::cmd
 		const FSourceControlOperationRef& /*InOperation*/,
 		const TArray<FString>&            /*InFiles*/) -> FCommandResult
 	{
-		// Build changelist states by scanning the file state cache for dirty files.
-		// Files with TreeState == Staged go into the Staged changelist; everything else
-		// dirty (Working, Untracked, etc.) goes into the Working changelist.
+		if (InCtx.Repository == nullptr || !InCtx.Repository->IsOpen())
+		{
+			return FCommandResult::Fail(LOCTEXT("ChangelistsNoRepo",
+				"GitLink: cannot update changelists — repository not open."));
+		}
+
+		// Run a fresh git status snapshot instead of reading the (potentially stale) file state
+		// cache. This ensures View Changes reflects the working tree as it is RIGHT NOW, not as
+		// it was the last time Cmd_Connect or Cmd_UpdateStatus ran.
+		const FStatus Snapshot = InCtx.Repository->Get_Status();
+
+		TMap<FString, FGitLink_CompositeState> CompositeByPath;
+		CompositeByPath.Reserve(Snapshot.Num());
+
+		AppendBucket(Snapshot.Staged,     EStatusBucket::Staged,     InCtx.RepoRootAbsolute, CompositeByPath);
+		AppendBucket(Snapshot.Unstaged,   EStatusBucket::Unstaged,   InCtx.RepoRootAbsolute, CompositeByPath);
+		AppendBucket(Snapshot.Conflicted, EStatusBucket::Conflicted, InCtx.RepoRootAbsolute, CompositeByPath);
+
+		// Content directory suffix — only files under a /Content/ directory are shown in
+		// View Changes, matching the existing GitSourceControl plugin's behaviour.
+		const FString ContentPathSegment = TEXT("/Content/");
+		const FDateTime Now = FDateTime::UtcNow();
+
 		FGitLink_ChangelistStateRef WorkingState = MakeShared<FGitLink_ChangelistState, ESPMode::ThreadSafe>(
 			FGitLink_Changelist::WorkingChangelist, TEXT("Working changes"));
 		FGitLink_ChangelistStateRef StagedState = MakeShared<FGitLink_ChangelistState, ESPMode::ThreadSafe>(
 			FGitLink_Changelist::StagedChangelist, TEXT("Staged changes"));
 
-		const TArray<FGitLink_FileStateRef> AllFiles = InCtx.StateCache.Enumerate_FileStates(
-			[](const FGitLink_FileStateRef& /*State*/) { return true; });
+		FCommandResult Result = FCommandResult::Ok();
+		Result.UpdatedStates.Reserve(CompositeByPath.Num());
 
-		// Content directory suffix — only files under a /Content/ directory are shown in
-		// View Changes, matching the existing GitSourceControl plugin's behaviour. This
-		// filters out source code, config, submodule dirs, .claude/, etc.
-		const FString ContentPathSegment = TEXT("/Content/");
-
-		for (const FGitLink_FileStateRef& FileState : AllFiles)
+		for (const TPair<FString, FGitLink_CompositeState>& Pair : CompositeByPath)
 		{
-			const EGitLink_TreeState Tree = FileState->_State.Tree;
-			const EGitLink_FileState File = FileState->_State.File;
+			const FString& AbsolutePath = Pair.Key;
+			const FGitLink_CompositeState& Composite = Pair.Value;
 
 			// Only show files under a Content/ directory.
-			if (!FileState->GetFilename().Contains(ContentPathSegment))
+			if (!AbsolutePath.Contains(ContentPathSegment))
 			{ continue; }
 
-			// Skip clean / non-repo files — they don't belong in any changelist.
-			if (Tree == EGitLink_TreeState::Unmodified ||
-				Tree == EGitLink_TreeState::Ignored ||
-				Tree == EGitLink_TreeState::NotInRepo ||
-				Tree == EGitLink_TreeState::Unset)
-			{
-				// Exception: if the file has a real modification state (Added/Modified/Deleted/Renamed)
-				// but the tree state is Unmodified, it's likely a file that was only staged.
-				if (File == EGitLink_FileState::Unknown || File == EGitLink_FileState::Missing)
-				{ continue; }
+			// Build a file state and assign it to the correct changelist.
+			FGitLink_FileStateRef FileState = MakeShared<FGitLink_FileState, ESPMode::ThreadSafe>(AbsolutePath);
+			FileState->_State     = Composite;
+			FileState->_TimeStamp = Now;
 
-				// Fall through to check for staged-only changes
-				if (Tree != EGitLink_TreeState::Unmodified)
-				{ continue; }
-			}
+			// Stamp lockable state so CanCheckout etc. behave correctly.
+			const bool bLockable = InCtx.Provider.Is_FileLockable(AbsolutePath);
+			FileState->_State.Lock = bLockable
+				? EGitLink_LockState::NotLocked
+				: EGitLink_LockState::Unlockable;
 
-			if (Tree == EGitLink_TreeState::Staged)
+			if (Composite.Tree == EGitLink_TreeState::Staged)
 			{
 				FileState->_Changelist = FGitLink_Changelist::StagedChangelist;
 				StagedState->_Files.Add(FileState);
 			}
 			else
 			{
-				// Working, Untracked, or any other dirty state
 				FileState->_Changelist = FGitLink_Changelist::WorkingChangelist;
 				WorkingState->_Files.Add(FileState);
 			}
+
+			// Also emit as UpdatedStates so the file state cache gets refreshed. This ensures
+			// that after View Changes opens, the content browser icons reflect current reality.
+			Result.UpdatedStates.Add(FileState);
 		}
 
-		WorkingState->_TimeStamp = FDateTime::UtcNow();
-		StagedState->_TimeStamp  = FDateTime::UtcNow();
+		WorkingState->_TimeStamp = Now;
+		StagedState->_TimeStamp  = Now;
 
-		FCommandResult Result = FCommandResult::Ok();
 		Result.UpdatedChangelistStates.Add(WorkingState);
 		Result.UpdatedChangelistStates.Add(StagedState);
 
 		UE_LOG(LogGitLink, Log,
-			TEXT("Cmd_UpdateChangelistsStatus: %d working, %d staged"),
-			WorkingState->_Files.Num(), StagedState->_Files.Num());
+			TEXT("Cmd_UpdateChangelistsStatus: %d working, %d staged (fresh scan: %d dirty total)"),
+			WorkingState->_Files.Num(), StagedState->_Files.Num(), CompositeByPath.Num());
 
 		return Result;
 	}

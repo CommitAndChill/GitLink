@@ -11,6 +11,8 @@
 #include <Misc/DateTime.h>
 #include <Misc/Paths.h>
 
+#include "GitLinkCore/Types/GitLink_Types.h"
+
 // --------------------------------------------------------------------------------------------------------------------
 // Shared helpers for Cmd_*.cpp files. Kept in Private/ so nothing outside the GitLink module
 // can see them. Intentionally free functions — no class, no namespace gymnastics.
@@ -138,5 +140,100 @@ namespace gitlink::cmd
 		UE_LOG(LogGitLink, Log,
 			TEXT("Release_LfsLocksBestEffort: unlocked %d file(s)"), RelativePaths.Num());
 		return true;
+	}
+
+	// ----------------------------------------------------------------------------------------------------------------
+	// Status mapping helpers — used by both Cmd_UpdateStatus and Cmd_UpdateChangelistsStatus to
+	// translate gitlink::FStatus snapshots into FGitLink_CompositeState entries.
+	// ----------------------------------------------------------------------------------------------------------------
+
+	enum class EStatusBucket : uint8
+	{
+		Staged,
+		Unstaged,
+		Conflicted,
+	};
+
+	inline auto Map_FileStatus(EFileStatus InStatus) -> EGitLink_FileState
+	{
+		switch (InStatus)
+		{
+			case EFileStatus::Added:      return EGitLink_FileState::Added;
+			case EFileStatus::Deleted:    return EGitLink_FileState::Deleted;
+			case EFileStatus::Modified:   return EGitLink_FileState::Modified;
+			case EFileStatus::Renamed:    return EGitLink_FileState::Renamed;
+			case EFileStatus::TypeChange: return EGitLink_FileState::Modified;
+			case EFileStatus::Untracked:  return EGitLink_FileState::Added;
+			case EFileStatus::Ignored:    return EGitLink_FileState::Unknown;
+			case EFileStatus::Conflicted: return EGitLink_FileState::Unmerged;
+			case EFileStatus::Unmodified: return EGitLink_FileState::Unknown;
+			default:                      return EGitLink_FileState::Unknown;
+		}
+	}
+
+	inline auto Map_TreeState(EStatusBucket InBucket, EFileStatus InStatus) -> EGitLink_TreeState
+	{
+		switch (InBucket)
+		{
+			case EStatusBucket::Staged:     return EGitLink_TreeState::Staged;
+			case EStatusBucket::Conflicted: return EGitLink_TreeState::Working;
+			case EStatusBucket::Unstaged:
+				if (InStatus == EFileStatus::Untracked) { return EGitLink_TreeState::Untracked; }
+				if (InStatus == EFileStatus::Ignored)   { return EGitLink_TreeState::Ignored;   }
+				return EGitLink_TreeState::Working;
+		}
+		return EGitLink_TreeState::Unset;
+	}
+
+	// Merge a change from a given bucket into a composite state. Working-tree changes take
+	// precedence over staged ones — a file staged then modified again shows as Modified.
+	inline auto Merge_CompositeState(FGitLink_CompositeState& InOut, EStatusBucket InBucket, const FFileChange& InChange) -> void
+	{
+		const EGitLink_FileState File = Map_FileStatus(InChange.Status);
+		const EGitLink_TreeState Tree = Map_TreeState(InBucket, InChange.Status);
+
+		if (InOut.File == EGitLink_FileState::Unknown || InBucket != EStatusBucket::Staged)
+		{
+			InOut.File = File;
+		}
+
+		auto Priority = [](EGitLink_TreeState T) -> int32
+		{
+			switch (T)
+			{
+				case EGitLink_TreeState::Working:    return 5;
+				case EGitLink_TreeState::Staged:     return 4;
+				case EGitLink_TreeState::Untracked:  return 3;
+				case EGitLink_TreeState::Ignored:    return 2;
+				case EGitLink_TreeState::Unmodified: return 1;
+				default:                             return 0;
+			}
+		};
+		if (Priority(Tree) > Priority(InOut.Tree))
+		{
+			InOut.Tree = Tree;
+		}
+	}
+
+	inline auto BuildAbsolutePath(const FString& InRepoRoot, const FString& InRelativePath) -> FString
+	{
+		FString Joined = FPaths::Combine(InRepoRoot, InRelativePath);
+		FPaths::NormalizeFilename(Joined);
+		return Joined;
+	}
+
+	// Process one bucket of file changes into a composite-by-path map.
+	inline auto AppendBucket(
+		const TArray<FFileChange>& InChanges,
+		EStatusBucket              InBucket,
+		const FString&             InRepoRoot,
+		TMap<FString, FGitLink_CompositeState>& OutCompositeByPath) -> void
+	{
+		for (const FFileChange& Change : InChanges)
+		{
+			const FString AbsolutePath = BuildAbsolutePath(InRepoRoot, Change.Path);
+			FGitLink_CompositeState& State = OutCompositeByPath.FindOrAdd(AbsolutePath);
+			Merge_CompositeState(State, InBucket, Change);
+		}
 	}
 }
