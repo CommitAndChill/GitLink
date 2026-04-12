@@ -80,7 +80,8 @@ auto FGitLink_CommandDispatcher::Dispatch(
 	const FSourceControlOperationRef& InOperation,
 	const TArray<FString>& InFiles,
 	EConcurrency::Type InConcurrency,
-	const FSourceControlOperationComplete& InCompleteDelegate) -> ECommandResult::Type
+	const FSourceControlOperationComplete& InCompleteDelegate,
+	FSourceControlChangelistPtr InChangelist) -> ECommandResult::Type
 {
 	const FName OpName = InOperation->GetName();
 	gitlink::cmd::FCommandFn* Handler = _Handlers.Find(OpName);
@@ -97,7 +98,7 @@ auto FGitLink_CommandDispatcher::Dispatch(
 	if (InConcurrency == EConcurrency::Synchronous)
 	{
 		const ECommandResult::Type SyncResult =
-			Execute_AndComplete(MoveTemp(HandlerCopy), InOperation, InFiles, InCompleteDelegate);
+			Execute_AndComplete(MoveTemp(HandlerCopy), InOperation, InFiles, InCompleteDelegate, InChangelist);
 		return SyncResult;
 	}
 
@@ -109,10 +110,11 @@ auto FGitLink_CommandDispatcher::Dispatch(
 			HandlerCopy = MoveTemp(HandlerCopy),
 			OpRef       = InOperation,
 			Files       = InFiles,
-			Complete    = InCompleteDelegate
+			Complete    = InCompleteDelegate,
+			Changelist  = InChangelist
 		]() mutable
 		{
-			Execute_AndComplete(MoveTemp(HandlerCopy), MoveTemp(OpRef), MoveTemp(Files), MoveTemp(Complete));
+			Execute_AndComplete(MoveTemp(HandlerCopy), MoveTemp(OpRef), MoveTemp(Files), MoveTemp(Complete), MoveTemp(Changelist));
 		});
 
 	return ECommandResult::Succeeded;
@@ -123,17 +125,19 @@ auto FGitLink_CommandDispatcher::Execute_AndComplete(
 	gitlink::cmd::FCommandFn        InHandler,
 	FSourceControlOperationRef      InOperation,
 	TArray<FString>                 InFiles,
-	FSourceControlOperationComplete InCompleteDelegate) -> ECommandResult::Type
+	FSourceControlOperationComplete InCompleteDelegate,
+	FSourceControlChangelistPtr     InChangelist) -> ECommandResult::Type
 {
 	// Build the context snapshotting what the handler needs, so it doesn't have to touch provider
 	// internals while running.
 	gitlink::cmd::FCommandContext Ctx
 	{
-		.Provider         = _Owner,
-		.StateCache       = _Owner.Get_StateCache(),
-		.Repository       = _Owner.Get_Repository(),
-		.Subprocess       = _Owner.Get_Subprocess(),
-		.RepoRootAbsolute = _Owner.Get_PathToRepositoryRoot(),
+		.Provider               = _Owner,
+		.StateCache             = _Owner.Get_StateCache(),
+		.Repository             = _Owner.Get_Repository(),
+		.Subprocess             = _Owner.Get_Subprocess(),
+		.RepoRootAbsolute       = _Owner.Get_PathToRepositoryRoot(),
+		.DestinationChangelist  = InChangelist,
 	};
 
 	gitlink::cmd::FCommandResult Result;

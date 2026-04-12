@@ -338,12 +338,12 @@ auto FGitLink_Provider::Execute(
 #else
 auto FGitLink_Provider::Execute(
 	const FSourceControlOperationRef& InOperation,
-	FSourceControlChangelistPtr /*InChangelist*/,
+	FSourceControlChangelistPtr InChangelist,
 	const TArray<FString>& InFiles,
 	EConcurrency::Type InConcurrency,
 	const FSourceControlOperationComplete& InOperationCompleteDelegate) -> ECommandResult::Type
 {
-	return _Dispatcher->Dispatch(InOperation, InFiles, InConcurrency, InOperationCompleteDelegate);
+	return _Dispatcher->Dispatch(InOperation, InFiles, InConcurrency, InOperationCompleteDelegate, InChangelist);
 }
 #endif
 
