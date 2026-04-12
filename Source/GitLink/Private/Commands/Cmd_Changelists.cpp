@@ -51,13 +51,64 @@ namespace gitlink::cmd
 	}
 
 	auto MoveToChangelist(
-		FCommandContext&                  /*InCtx*/,
+		FCommandContext&                  InCtx,
 		const FSourceControlOperationRef& /*InOperation*/,
 		const TArray<FString>&            InFiles) -> FCommandResult
 	{
-		UE_LOG(LogGitLink, Log,
-			TEXT("Cmd_MoveToChangelist[stub]: %d file(s) — persistence layer pending"),
-			InFiles.Num());
+		if (InCtx.Repository == nullptr || !InCtx.Repository->IsOpen())
+		{
+			return FCommandResult::Fail(LOCTEXT("MoveNoRepo",
+				"GitLink: cannot move to changelist — repository not open."));
+		}
+
+		if (!InCtx.DestinationChangelist.IsValid())
+		{
+			UE_LOG(LogGitLink, Warning, TEXT("Cmd_MoveToChangelist: no destination changelist"));
+			return FCommandResult::Ok();  // silently succeed like the stub did
+		}
+
+		// Downcast the destination changelist to get the name.
+		const FGitLink_Changelist* DestCL =
+			static_cast<const FGitLink_Changelist*>(InCtx.DestinationChangelist.Get());
+		const FString DestName = DestCL->Get_Name();
+
+		// Convert absolute paths to repo-relative for libgit2.
+		TArray<FString> RelativePaths;
+		RelativePaths.Reserve(InFiles.Num());
+		for (const FString& File : InFiles)
+		{
+			RelativePaths.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, File));
+		}
+
+		FResult OpResult;
+		if (DestName == FGitLink_Changelist::StagedChangelist.Get_Name())
+		{
+			// Working → Staged = git add
+			OpResult = InCtx.Repository->Stage(RelativePaths);
+			UE_LOG(LogGitLink, Log,
+				TEXT("Cmd_MoveToChangelist: staged %d file(s)"), RelativePaths.Num());
+		}
+		else if (DestName == FGitLink_Changelist::WorkingChangelist.Get_Name())
+		{
+			// Staged → Working = git restore --staged (unstage)
+			OpResult = InCtx.Repository->Unstage(RelativePaths);
+			UE_LOG(LogGitLink, Log,
+				TEXT("Cmd_MoveToChangelist: unstaged %d file(s)"), RelativePaths.Num());
+		}
+		else
+		{
+			// Named changelists — stub for now (persistence layer pending).
+			UE_LOG(LogGitLink, Log,
+				TEXT("Cmd_MoveToChangelist: named changelist '%s' — %d file(s), persistence pending"),
+				*DestName, InFiles.Num());
+			return FCommandResult::Ok();
+		}
+
+		if (!OpResult)
+		{
+			return FCommandResult::Fail(FText::FromString(OpResult.ErrorMessage));
+		}
+
 		return FCommandResult::Ok();
 	}
 

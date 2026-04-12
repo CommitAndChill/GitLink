@@ -4,6 +4,7 @@
 #include "GitLink_ChangelistState.h"
 
 #include <CoreMinimal.h>
+#include <ISourceControlChangelist.h>
 #include <ISourceControlProvider.h>
 #include <Templates/Function.h>
 
@@ -40,6 +41,9 @@ namespace gitlink::cmd
 		// Absolute path to the repository working tree root — copied from the provider so command
 		// handlers don't need to take the provider lock to read it.
 		FString RepoRootAbsolute;
+
+		// Destination changelist for MoveToChangelist operations. Nullptr for all other ops.
+		FSourceControlChangelistPtr DestinationChangelist;
 	};
 
 	struct FCommandResult
@@ -95,7 +99,8 @@ public:
 		const FSourceControlOperationRef& InOperation,
 		const TArray<FString>& InFiles,
 		EConcurrency::Type InConcurrency,
-		const FSourceControlOperationComplete& InCompleteDelegate) -> ECommandResult::Type;
+		const FSourceControlOperationComplete& InCompleteDelegate,
+		FSourceControlChangelistPtr InChangelist = nullptr) -> ECommandResult::Type;
 
 	auto CanCancel(const FSourceControlOperationRef& InOperation) const -> bool;
 	auto Cancel   (const FSourceControlOperationRef& InOperation)       -> void;
@@ -109,7 +114,8 @@ private:
 		gitlink::cmd::FCommandFn          InHandler,
 		FSourceControlOperationRef        InOperation,
 		TArray<FString>                   InFiles,
-		FSourceControlOperationComplete   InCompleteDelegate) -> ECommandResult::Type;
+		FSourceControlOperationComplete   InCompleteDelegate,
+		FSourceControlChangelistPtr       InChangelist) -> ECommandResult::Type;
 
 	FGitLink_Provider& _Owner;
 	TMap<FName, gitlink::cmd::FCommandFn> _Handlers;
