@@ -39,9 +39,9 @@ State predicates (`CanCheckout`, `CanRevert`, `IsCheckedOut`, etc.) are on `FGit
 ### LFS Locking
 
 - **CheckOut** = `git lfs lock` via subprocess. Sets `Lock = Locked`, clears read-only flag.
-- **Revert** = `git lfs unlock` (with `--force` and `--id` fallback) + `git_checkout_head` for file discard.
-- **Identity mismatch**: GitHub username may differ from `git config user.name`. Unlock by `--id` works because the server validates via auth token.
+- **Revert** = `git_checkout_head` to discard changes, then `git lfs unlock` to release the lock.
 - **Idempotent checkout**: "Lock exists" is treated as success (file already locked by us).
+- **No `--force` on unlock**: Callers always discard/commit before unlocking, so the working tree is clean. Omitting `--force` avoids the "admin access" error that occurs when the LFS server identity (GitHub username) differs from `git config user.name`.
 
 ### Submodule Support
 
@@ -78,7 +78,7 @@ At connect time, `git_submodule_foreach` enumerates submodule paths stored on th
 
 2. **Repo-relative vs absolute paths** — libgit2 operations (`git_checkout_head`, `git_reset_default`) need repo-relative paths. The editor passes absolute paths. Use `ToRepoRelativePath()` before calling into GitLinkCore.
 
-3. **LFS identity mismatch** — The GitHub username ("Matiaus") may differ from `git config user.name` ("Neil Koo"). `git lfs unlock --force <path>` treats this as "someone else's lock" requiring admin. Use `unlock --id=<N>` instead.
+3. **LFS unlock — no `--force`** — Never use `--force` on `git lfs unlock`. It triggers an "admin access required" error when the GitHub username differs from `git config user.name`. Instead, ensure the working tree is clean before unlocking (callers must discard/commit first).
 
 4. **Cmd_Connect re-init** — The editor fires `Init(force=true)` multiple times during startup. `Cmd_Connect` rebuilds the entire state cache each time. LFS lock discovery must run during connect to avoid losing lock state.
 
