@@ -117,72 +117,26 @@ namespace gitlink::cmd
 		if (RelativePaths.IsEmpty())
 		{ return true; }  // nothing to unlock
 
-		bool bAllOk = true;
-		int32 UnlockedCount = 0;
+		// No --force flag: callers (Cmd_Revert, Cmd_CheckIn) discard/commit changes
+		// before unlocking, so the working tree should be clean. Omitting --force also
+		// avoids the "admin access required" error that occurs when the LFS server's
+		// lock owner identity (GitHub username) differs from git config user.name.
+		TArray<FString> UnlockArgs;
+		UnlockArgs.Reserve(RelativePaths.Num() + 1);
+		UnlockArgs.Add(TEXT("unlock"));
+		UnlockArgs.Append(RelativePaths);
 
-		for (const FString& RelPath : RelativePaths)
+		const FGitLink_SubprocessResult Result = InCtx.Subprocess->RunLfs(UnlockArgs);
+		if (!Result.IsSuccess())
 		{
-			// Try path-based unlock first (works when git user identity matches the
-			// LFS server's lock owner). Falls back to --id unlock when the server
-			// rejects --force due to identity mismatch (e.g. GitHub username differs
-			// from git config user.name).
-			TArray<FString> UnlockArgs = { TEXT("unlock"), TEXT("--force"), RelPath };
-			FGitLink_SubprocessResult Result = InCtx.Subprocess->RunLfs(UnlockArgs);
-
-			if (!Result.IsSuccess())
-			{
-				// Path-based unlock failed (likely identity mismatch). Try by --id.
-				// Query the lock ID for this specific file.
-				FGitLink_SubprocessResult LocksResult = InCtx.Subprocess->RunLfs(
-					{ TEXT("locks"), TEXT("--path"), RelPath });
-
-				if (LocksResult.IsSuccess())
-				{
-					// Parse "path\towner\tID:12345" to extract the ID
-					FString LockId;
-					const FString& Output = LocksResult.StdOut;
-					int32 IdIdx = Output.Find(TEXT("ID:"));
-					if (IdIdx != INDEX_NONE)
-					{
-						LockId = Output.Mid(IdIdx + 3).TrimStartAndEnd();
-						// Strip any trailing whitespace or newline
-						int32 EndIdx = 0;
-						while (EndIdx < LockId.Len() && FChar::IsDigit(LockId[EndIdx]))
-						{ ++EndIdx; }
-						LockId.LeftInline(EndIdx);
-					}
-
-					if (!LockId.IsEmpty())
-					{
-						FGitLink_SubprocessResult IdResult = InCtx.Subprocess->RunLfs(
-							{ TEXT("unlock"), TEXT("--id"), LockId });
-						if (IdResult.IsSuccess())
-						{
-							++UnlockedCount;
-							continue;
-						}
-						UE_LOG(LogGitLink, Warning,
-							TEXT("Release_LfsLocksBestEffort: unlock --id=%s failed: %s"),
-							*LockId, *IdResult.Get_CombinedError());
-					}
-				}
-
-				UE_LOG(LogGitLink, Warning,
-					TEXT("Release_LfsLocksBestEffort: could not unlock '%s': %s"),
-					*RelPath, *Result.Get_CombinedError());
-				bAllOk = false;
-			}
-			else
-			{
-				++UnlockedCount;
-			}
+			UE_LOG(LogGitLink, Warning,
+				TEXT("Release_LfsLocksBestEffort: git lfs unlock returned: %s"),
+				*Result.Get_CombinedError());
+			return false;
 		}
 
-		if (UnlockedCount > 0)
-		{
-			UE_LOG(LogGitLink, Log,
-				TEXT("Release_LfsLocksBestEffort: unlocked %d file(s)"), UnlockedCount);
-		}
-		return bAllOk;
+		UE_LOG(LogGitLink, Log,
+			TEXT("Release_LfsLocksBestEffort: unlocked %d file(s)"), RelativePaths.Num());
+		return true;
 	}
 }
