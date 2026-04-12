@@ -200,13 +200,23 @@ namespace gitlink::cmd
 			State->_State     = InComposite;
 			State->_TimeStamp = Now;
 
-			// Stamp the Lock component based on whether the file's extension is LFS-lockable.
-			// This is what makes CanCheckout return true for binary assets and false for plain
-			// text files, matching the existing GitSourceControl behaviour.
-			const bool bLockable = InCtx.Provider.Is_FileLockable(InFilename);
-			State->_State.Lock = bLockable
-				? EGitLink_LockState::NotLocked
-				: EGitLink_LockState::Unlockable;
+			// Carry forward the existing lock state from the cache so that a prior Locked
+			// (from Cmd_CheckOut) isn't clobbered to NotLocked. Lock state is owned by
+			// Cmd_CheckOut / Cmd_Revert / Cmd_Connect — UpdateStatus only needs to ensure
+			// the lockable/unlockable distinction is correct for files not yet queried.
+			const FGitLink_FileStateRef Existing = InCtx.StateCache.Find_FileState(InFilename);
+			if (Existing->_State.Lock != EGitLink_LockState::Unknown)
+			{
+				State->_State.Lock = Existing->_State.Lock;
+				State->_State.LockUser = Existing->_State.LockUser;
+			}
+			else
+			{
+				const bool bLockable = InCtx.Provider.Is_FileLockable(InFilename);
+				State->_State.Lock = bLockable
+					? EGitLink_LockState::NotLocked
+					: EGitLink_LockState::Unlockable;
+			}
 
 			// Assign to a changelist so View Changes knows where this file belongs.
 			if (InComposite.Tree == EGitLink_TreeState::Staged)

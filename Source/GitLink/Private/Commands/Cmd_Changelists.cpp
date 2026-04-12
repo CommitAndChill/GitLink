@@ -111,11 +111,21 @@ namespace gitlink::cmd
 			FileState->_State     = Composite;
 			FileState->_TimeStamp = Now;
 
-			// Stamp lockable state so CanCheckout etc. behave correctly.
-			const bool bLockable = InCtx.Provider.Is_FileLockable(AbsolutePath);
-			FileState->_State.Lock = bLockable
-				? EGitLink_LockState::NotLocked
-				: EGitLink_LockState::Unlockable;
+			// Carry forward the existing lock state from the cache so that a prior Locked
+			// (from Cmd_CheckOut) isn't clobbered to NotLocked.
+			const FGitLink_FileStateRef Existing = InCtx.StateCache.Find_FileState(AbsolutePath);
+			if (Existing->_State.Lock != EGitLink_LockState::Unknown)
+			{
+				FileState->_State.Lock     = Existing->_State.Lock;
+				FileState->_State.LockUser = Existing->_State.LockUser;
+			}
+			else
+			{
+				const bool bLockable = InCtx.Provider.Is_FileLockable(AbsolutePath);
+				FileState->_State.Lock = bLockable
+					? EGitLink_LockState::NotLocked
+					: EGitLink_LockState::Unlockable;
+			}
 
 			if (Composite.Tree == EGitLink_TreeState::Staged)
 			{
