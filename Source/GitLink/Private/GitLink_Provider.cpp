@@ -176,7 +176,7 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 
 	UE_LOG(LogGitLink, Log,
 		TEXT("CheckRepositoryStatus: repo='%s' branch='%s' remote='%s' user='%s <%s>' ")
-		TEXT("lfs=%s lockable_exts=%d submodules=%d"),
+		TEXT("lfs=%s lockable_exts=%d (0=using hardcoded defaults) submodules=%d"),
 		*_PathToRepositoryRoot, *_BranchName, *_RemoteUrl, *_UserName, *_UserEmail,
 		_bLfsAvailable ? TEXT("yes") : TEXT("no"),
 		_LockableExtensions.Num(),
