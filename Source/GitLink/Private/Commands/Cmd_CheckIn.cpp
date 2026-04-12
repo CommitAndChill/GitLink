@@ -68,18 +68,43 @@ namespace gitlink::cmd
 		else
 		{
 			// No explicit file list — View Changes submit path. Gather files from the
-			// Working + Staged changelists in the cache and stage those specifically.
-			// We can't use StageAll() because it tries to stage submodule directories
-			// which libgit2 rejects with "invalid path".
+			// specific changelist being submitted (if provided), or all changelists as
+			// fallback. We can't use StageAll() because it tries to stage submodule
+			// directories which libgit2 rejects with "invalid path".
 			TArray<FString> ChangelistRelPaths;
 
-			const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
-			for (const FGitLink_ChangelistStateRef& CL : AllCL)
+			if (InCtx.DestinationChangelist.IsValid())
 			{
-				for (const FSourceControlStateRef& FileState : CL->_Files)
+				// Submit from a specific changelist — only stage its files.
+				const FGitLink_Changelist* SourceCL =
+					static_cast<const FGitLink_Changelist*>(InCtx.DestinationChangelist.Get());
+				const FString SourceName = SourceCL->Get_Name();
+
+				const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
+				for (const FGitLink_ChangelistStateRef& CL : AllCL)
 				{
-					ChangelistRelPaths.Add(
-						ToRepoRelativePath(InCtx.RepoRootAbsolute, FileState->GetFilename()));
+					if (CL->_Changelist.Get_Name() != SourceName)
+					{ continue; }
+
+					for (const FSourceControlStateRef& FileState : CL->_Files)
+					{
+						ChangelistRelPaths.Add(
+							ToRepoRelativePath(InCtx.RepoRootAbsolute, FileState->GetFilename()));
+					}
+					break;
+				}
+			}
+			else
+			{
+				// No specific changelist — gather from all (legacy fallback).
+				const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
+				for (const FGitLink_ChangelistStateRef& CL : AllCL)
+				{
+					for (const FSourceControlStateRef& FileState : CL->_Files)
+					{
+						ChangelistRelPaths.Add(
+							ToRepoRelativePath(InCtx.RepoRootAbsolute, FileState->GetFilename()));
+					}
 				}
 			}
 
@@ -150,13 +175,23 @@ namespace gitlink::cmd
 		}
 
 		// Build the unified list of committed files. If InFiles was empty (View Changes
-		// submit), we need to reconstruct it from the changelist states.
+		// submit), reconstruct from the specific changelist being submitted (matching
+		// the staging logic above).
 		TArray<FString> CommittedFiles = InFiles;
 		if (CommittedFiles.IsEmpty())
 		{
 			const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
 			for (const FGitLink_ChangelistStateRef& CL : AllCL)
 			{
+				// If a specific changelist was provided, only gather from that one.
+				if (InCtx.DestinationChangelist.IsValid())
+				{
+					const FGitLink_Changelist* SourceCL =
+						static_cast<const FGitLink_Changelist*>(InCtx.DestinationChangelist.Get());
+					if (CL->_Changelist.Get_Name() != SourceCL->Get_Name())
+					{ continue; }
+				}
+
 				for (const FSourceControlStateRef& FileState : CL->_Files)
 				{
 					CommittedFiles.Add(FileState->GetFilename());
