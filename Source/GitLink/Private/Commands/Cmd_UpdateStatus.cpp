@@ -245,7 +245,7 @@ namespace gitlink::cmd
 					MakeShared<FGitLink_Revision, ESPMode::ThreadSafe>();
 				Rev->_Filename          = InAbsoluteFilename;
 				Rev->_CommitId          = Commit.Hash;
-				Rev->_ShortCommitId     = Commit.ShortHash;
+				Rev->_ShortCommitId     = Commit.Hash.Left(8);  // 8 chars to match GitSourceControl
 				Rev->_Description       = Commit.Summary.IsEmpty() ? Commit.Message : Commit.Summary;
 				Rev->_UserName          = Commit.Author.Name;
 				Rev->_Date              = Commit.Author.When;
