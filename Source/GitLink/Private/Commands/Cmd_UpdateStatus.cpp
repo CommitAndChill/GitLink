@@ -40,86 +40,8 @@ namespace gitlink::cmd
 {
 	namespace
 	{
-		enum class EStatusBucket : uint8
-		{
-			Staged,
-			Unstaged,
-			Conflicted,
-		};
-
-		auto Map_FileStatus(EFileStatus InStatus) -> EGitLink_FileState
-		{
-			switch (InStatus)
-			{
-				case EFileStatus::Added:      return EGitLink_FileState::Added;
-				case EFileStatus::Deleted:    return EGitLink_FileState::Deleted;
-				case EFileStatus::Modified:   return EGitLink_FileState::Modified;
-				case EFileStatus::Renamed:    return EGitLink_FileState::Renamed;
-				case EFileStatus::TypeChange: return EGitLink_FileState::Modified;
-				case EFileStatus::Untracked:  return EGitLink_FileState::Added;
-				case EFileStatus::Ignored:    return EGitLink_FileState::Unknown;
-				case EFileStatus::Conflicted: return EGitLink_FileState::Unmerged;
-				case EFileStatus::Unmodified: return EGitLink_FileState::Unknown;
-				default:                      return EGitLink_FileState::Unknown;
-			}
-		}
-
-		auto Map_TreeState(EStatusBucket InBucket, EFileStatus InStatus) -> EGitLink_TreeState
-		{
-			switch (InBucket)
-			{
-				case EStatusBucket::Staged:     return EGitLink_TreeState::Staged;
-				case EStatusBucket::Conflicted: return EGitLink_TreeState::Working;
-				case EStatusBucket::Unstaged:
-					if (InStatus == EFileStatus::Untracked) { return EGitLink_TreeState::Untracked; }
-					if (InStatus == EFileStatus::Ignored)   { return EGitLink_TreeState::Ignored;   }
-					return EGitLink_TreeState::Working;
-			}
-			return EGitLink_TreeState::Unset;
-		}
-
-		// Merge a change from a given bucket into the composite state. Working-tree changes
-		// take precedence over staged ones for the purposes of the priority order — a file
-		// staged then modified again should display as Modified (not Added/Staged).
-		auto Merge_CompositeState(FGitLink_CompositeState& InOut, EStatusBucket InBucket, const FFileChange& InChange) -> void
-		{
-			const EGitLink_FileState File = Map_FileStatus(InChange.Status);
-			const EGitLink_TreeState Tree = Map_TreeState(InBucket, InChange.Status);
-
-			// First hit always wins on File; subsequent Working-bucket hits can override a Staged first hit.
-			if (InOut.File == EGitLink_FileState::Unknown || InBucket != EStatusBucket::Staged)
-			{
-				InOut.File = File;
-			}
-
-			// Tree priority: Working > Staged > Untracked > Ignored > Unset
-			auto Priority = [](EGitLink_TreeState T) -> int32
-			{
-				switch (T)
-				{
-					case EGitLink_TreeState::Working:    return 5;
-					case EGitLink_TreeState::Staged:     return 4;
-					case EGitLink_TreeState::Untracked:  return 3;
-					case EGitLink_TreeState::Ignored:    return 2;
-					case EGitLink_TreeState::Unmodified: return 1;
-					default:                             return 0;
-				}
-			};
-			if (Priority(Tree) > Priority(InOut.Tree))
-			{
-				InOut.Tree = Tree;
-			}
-		}
-
-		auto BuildAbsolutePath(const FString& InRepoRoot, const FString& InRelativePath) -> FString
-		{
-			FString Joined = FPaths::Combine(InRepoRoot, InRelativePath);
-			FPaths::NormalizeFilename(Joined);
-			return Joined;
-		}
-
-		// Process one bucket into OutCompositeByPath.
-		auto AppendBucket(
+		// LFS-aware bucket appender — extends the shared AppendBucket with LFS state propagation.
+		auto AppendBucket_WithLfs(
 			const TArray<FFileChange>& InChanges,
 			EStatusBucket              InBucket,
 			const FString&             InRepoRoot,
@@ -159,9 +81,9 @@ namespace gitlink::cmd
 		TMap<FString, FGitLink_CompositeState> CompositeByPath;
 		CompositeByPath.Reserve(Snapshot.Num());
 
-		AppendBucket(Snapshot.Staged,     EStatusBucket::Staged,     InCtx.RepoRootAbsolute, CompositeByPath);
-		AppendBucket(Snapshot.Unstaged,   EStatusBucket::Unstaged,   InCtx.RepoRootAbsolute, CompositeByPath);
-		AppendBucket(Snapshot.Conflicted, EStatusBucket::Conflicted, InCtx.RepoRootAbsolute, CompositeByPath);
+		AppendBucket_WithLfs(Snapshot.Staged,     EStatusBucket::Staged,     InCtx.RepoRootAbsolute, CompositeByPath);
+		AppendBucket_WithLfs(Snapshot.Unstaged,   EStatusBucket::Unstaged,   InCtx.RepoRootAbsolute, CompositeByPath);
+		AppendBucket_WithLfs(Snapshot.Conflicted, EStatusBucket::Conflicted, InCtx.RepoRootAbsolute, CompositeByPath);
 
 		FCommandResult Result = FCommandResult::Ok();
 		Result.UpdatedStates.Reserve(FMath::Max(InFiles.Num(), CompositeByPath.Num()));
