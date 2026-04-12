@@ -126,6 +126,43 @@ namespace gitlink::cmd
 			}
 		}
 
+		// If submitting a specific changelist, temporarily unstage files from OTHER
+		// changelists so they don't get swept into this commit. git commit always
+		// commits everything in the index, so if file B was previously staged via
+		// MoveToChangelist and we only want to commit file A from Working, we must
+		// unstage B first, commit, then re-stage B.
+		TArray<FString> FilesToRestage;
+		if (InCtx.DestinationChangelist.IsValid())
+		{
+			const FGitLink_Changelist* SourceCL =
+				static_cast<const FGitLink_Changelist*>(InCtx.DestinationChangelist.Get());
+			const FString SourceName = SourceCL->Get_Name();
+
+			const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
+			for (const FGitLink_ChangelistStateRef& CL : AllCL)
+			{
+				if (CL->_Changelist.Get_Name() == SourceName || CL->_Files.Num() == 0)
+				{ continue; }
+
+				// This changelist is NOT being submitted — unstage its files temporarily.
+				TArray<FString> OtherRelPaths;
+				for (const FSourceControlStateRef& FileState : CL->_Files)
+				{
+					const FString Rel = ToRepoRelativePath(InCtx.RepoRootAbsolute, FileState->GetFilename());
+					OtherRelPaths.Add(Rel);
+					FilesToRestage.Add(Rel);
+				}
+
+				if (!OtherRelPaths.IsEmpty())
+				{
+					InCtx.Repository->Unstage(OtherRelPaths);
+					UE_LOG(LogGitLink, Log,
+						TEXT("Cmd_CheckIn: temporarily unstaged %d file(s) from '%s' changelist"),
+						OtherRelPaths.Num(), *CL->_Changelist.Get_Name());
+				}
+			}
+		}
+
 		// Two commit paths:
 		//   A. Subprocess (git.exe): when the repo has pre-commit or commit-msg hooks, because
 		//      libgit2 silently skips all hooks and the user expects them to run. This path
@@ -152,6 +189,8 @@ namespace gitlink::cmd
 			const FGitLink_SubprocessResult SubResult = InCtx.Subprocess->Run(CommitArgs);
 			if (!SubResult.IsSuccess())
 			{
+				if (!FilesToRestage.IsEmpty())
+				{ InCtx.Repository->Stage(FilesToRestage); }
 				return FCommandResult::Fail(FText::Format(
 					LOCTEXT("SubprocessCommitFailed", "GitLink: git commit (subprocess) failed: {0}"),
 					FText::FromString(SubResult.Get_CombinedError())));
@@ -170,8 +209,20 @@ namespace gitlink::cmd
 			const FResult CommitRes = InCtx.Repository->Commit(Params);
 			if (!CommitRes)
 			{
+				// Re-stage before returning on error so we don't leave the index dirty.
+				if (!FilesToRestage.IsEmpty())
+				{ InCtx.Repository->Stage(FilesToRestage); }
 				return FCommandResult::Fail(FText::FromString(CommitRes.ErrorMessage));
 			}
+		}
+
+		// Re-stage files from other changelists that we temporarily unstaged.
+		if (!FilesToRestage.IsEmpty())
+		{
+			InCtx.Repository->Stage(FilesToRestage);
+			UE_LOG(LogGitLink, Log,
+				TEXT("Cmd_CheckIn: re-staged %d file(s) from other changelists"),
+				FilesToRestage.Num());
 		}
 
 		// Build the unified list of committed files. If InFiles was empty (View Changes
