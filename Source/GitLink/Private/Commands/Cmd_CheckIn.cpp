@@ -39,10 +39,62 @@ namespace gitlink::cmd
 				"GitLink: cannot check in — commit description is empty."));
 		}
 
-		// Stage requested files. An empty file list = commit whatever's already in the index.
+		// Stage files for commit. The editor passes absolute paths but libgit2's
+		// git_index_add_all needs repo-relative pathspecs — convert before staging.
+		//
+		// When submitting from View Changes, the editor calls CheckIn with an EMPTY
+		// file list (files are in the changelist, not InFiles). In that case we stage
+		// all dirty files, matching `git commit -a` behaviour.
 		if (!InFiles.IsEmpty())
 		{
-			const FResult StageRes = InCtx.Repository->Stage(InFiles);
+			TArray<FString> RelativePaths;
+			RelativePaths.Reserve(InFiles.Num());
+			for (const FString& File : InFiles)
+			{
+				RelativePaths.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, File));
+			}
+
+			UE_LOG(LogGitLink, Log,
+				TEXT("Cmd_CheckIn: staging %d file(s) (first: '%s')"),
+				RelativePaths.Num(),
+				RelativePaths.Num() > 0 ? *RelativePaths[0] : TEXT("<none>"));
+
+			const FResult StageRes = InCtx.Repository->Stage(RelativePaths);
+			if (!StageRes)
+			{
+				return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
+			}
+		}
+		else
+		{
+			// No explicit file list — View Changes submit path. Gather files from the
+			// Working + Staged changelists in the cache and stage those specifically.
+			// We can't use StageAll() because it tries to stage submodule directories
+			// which libgit2 rejects with "invalid path".
+			TArray<FString> ChangelistRelPaths;
+
+			const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
+			for (const FGitLink_ChangelistStateRef& CL : AllCL)
+			{
+				for (const FSourceControlStateRef& FileState : CL->_Files)
+				{
+					ChangelistRelPaths.Add(
+						ToRepoRelativePath(InCtx.RepoRootAbsolute, FileState->GetFilename()));
+				}
+			}
+
+			if (ChangelistRelPaths.IsEmpty())
+			{
+				return FCommandResult::Fail(LOCTEXT("NothingToCommit",
+					"GitLink: nothing to commit — no files in changelists."));
+			}
+
+			UE_LOG(LogGitLink, Log,
+				TEXT("Cmd_CheckIn: staging %d changelist file(s) (first: '%s')"),
+				ChangelistRelPaths.Num(),
+				*ChangelistRelPaths[0]);
+
+			const FResult StageRes = InCtx.Repository->Stage(ChangelistRelPaths);
 			if (!StageRes)
 			{
 				return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
@@ -97,28 +149,53 @@ namespace gitlink::cmd
 			}
 		}
 
-		// Release any LFS locks we held on the committed files so they're free for the next
-		// editor to check out. This is typical behaviour for LFS-locked workflows — the
-		// edit-commit cycle ends with the lock being released.
-		Release_LfsLocksBestEffort(InCtx, InFiles);
+		// Build the unified list of committed files. If InFiles was empty (View Changes
+		// submit), we need to reconstruct it from the changelist states.
+		TArray<FString> CommittedFiles = InFiles;
+		if (CommittedFiles.IsEmpty())
+		{
+			const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
+			for (const FGitLink_ChangelistStateRef& CL : AllCL)
+			{
+				for (const FSourceControlStateRef& FileState : CL->_Files)
+				{
+					CommittedFiles.Add(FileState->GetFilename());
+				}
+			}
+		}
 
-		// Build predictive Unmodified states for the committed files, stamping the Lock
-		// component back to NotLocked (or Unlockable for non-lockable files).
+		// Release LFS locks unless the user checked "Keep Files Checked Out".
+		const bool bKeepCheckedOut = CheckInOp->GetKeepCheckedOut();
+		if (!bKeepCheckedOut)
+		{
+			Release_LfsLocksBestEffort(InCtx, CommittedFiles);
+		}
+
+		// Build predictive Unmodified states for the committed files.
 		FCommandResult Result = FCommandResult::Ok();
-		Result.UpdatedStates.Reserve(InFiles.Num());
-		for (const FString& File : InFiles)
+		Result.UpdatedStates.Reserve(CommittedFiles.Num());
+		for (const FString& File : CommittedFiles)
 		{
 			const bool bLockable = InCtx.Provider.Is_FileLockable(File);
 			FGitLink_CompositeState Composite;
 			Composite.File = EGitLink_FileState::Unknown;
 			Composite.Tree = EGitLink_TreeState::Unmodified;
-			Composite.Lock = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
+
+			if (bKeepCheckedOut && bLockable)
+			{
+				Composite.Lock = EGitLink_LockState::Locked;
+			}
+			else
+			{
+				Composite.Lock = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
+			}
+
 			Result.UpdatedStates.Add(Make_FileState(Normalize_AbsolutePath(File), Composite));
 		}
 
 		CheckInOp->SetSuccessMessage(FText::Format(
 			LOCTEXT("CheckInSuccess", "Committed {0} file(s) on branch '{1}'."),
-			FText::AsNumber(InFiles.Num()),
+			FText::AsNumber(CommittedFiles.Num()),
 			FText::FromString(InCtx.Provider.Get_BranchName())));
 
 		Result.InfoMessages.Add(CheckInOp->GetSuccessMessage());
