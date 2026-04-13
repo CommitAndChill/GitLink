@@ -13,8 +13,7 @@
 // Unstaged / Conflicted buckets that Unreal's source control expects.
 //
 // A single file may appear in BOTH Staged and Unstaged if it has staged changes and then further
-// working-tree modifications — that matches how `git status` reports it and the existing
-// GitSourceControl plugin.
+// working-tree modifications — that matches how `git status` reports it.
 // --------------------------------------------------------------------------------------------------------------------
 
 namespace gitlink::op

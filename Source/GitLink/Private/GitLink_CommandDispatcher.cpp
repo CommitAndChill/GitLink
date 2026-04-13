@@ -37,8 +37,7 @@ namespace
 {
 	// FSourceControlOperationBase doesn't expose a static name method — the runtime FName comes
 	// from GetName() on each instance, which by convention matches the class name minus the "F".
-	// We use string literals here to match what the existing GitSourceControl plugin does, which
-	// mirrors what ISourceControlOperation::GetName() produces.
+	// We use string literals here matching what ISourceControlOperation::GetName() produces.
 	auto Register_AllCommands(FGitLink_CommandDispatcher& InDispatcher) -> void
 	{
 		InDispatcher.Register(TEXT("Connect"),      &gitlink::cmd::Connect);

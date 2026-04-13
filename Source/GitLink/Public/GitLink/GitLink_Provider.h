@@ -134,7 +134,7 @@ public:
 	// `git check-attr lockable *.uasset *.umap ...`.
 	auto Is_FileLockable(const FString& InAbsolutePath) const -> bool;
 
-	// True when the file lives inside a git submodule (e.g. Plugins/CkFoundation/).
+	// True when the file lives inside a git submodule.
 	// Submodule files should not be checked out / checked in from the parent repo.
 	auto Is_InSubmodule(const FString& InAbsolutePath) const -> bool;
 

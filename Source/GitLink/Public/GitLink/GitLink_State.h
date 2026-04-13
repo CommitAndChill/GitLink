@@ -10,10 +10,8 @@
 // --------------------------------------------------------------------------------------------------------------------
 // Per-file state tracked by the GitLink provider.
 //
-// The priority enum (EGitLink_Status) mirrors the one in the existing GitSourceControl plugin —
-// these categories are fundamentally bound to how git semantics map onto Unreal's
-// IsCheckedOut / IsModified / IsAdded / IsDeleted / ... question shape, so the categories are
-// nearly identical. Naming is brand-neutral.
+// The priority enum (EGitLink_Status) is bound to how git semantics map onto Unreal's
+// IsCheckedOut / IsModified / IsAdded / IsDeleted / ... question shape.
 // --------------------------------------------------------------------------------------------------------------------
 
 // Coarse status priority — used by the icon + tooltip picker to decide what the editor shows.

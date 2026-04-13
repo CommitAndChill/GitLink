@@ -7,9 +7,8 @@
 // --------------------------------------------------------------------------------------------------------------------
 // Self-contained validity helpers.
 //
-// GitLink is a standalone plugin — it deliberately does not depend on CkCore/CkFoundation, so we
-// provide our own thin IsValid / Is_NOT_Valid wrappers here. They read the same as the Ck helpers
-// so code style matches, but no header from any Ck module is required.
+// Thin IsValid / Is_NOT_Valid wrappers for common UE types. GitLink is a standalone plugin with
+// no external module dependencies, so we provide our own rather than pulling in a utility library.
 // --------------------------------------------------------------------------------------------------------------------
 
 namespace gitlink
