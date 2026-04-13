@@ -23,6 +23,13 @@
 
 namespace gitlink::cmd
 {
+	// Forward declaration — defined later in this file. Called by MoveToChangelist to
+	// refresh the View Changes window after a stage/unstage operation.
+	auto UpdateChangelistsStatus(
+		FCommandContext& InCtx,
+		const FSourceControlOperationRef& InOperation,
+		const TArray<FString>& InFiles) -> FCommandResult;
+
 	auto NewChangelist(
 		FCommandContext&                  /*InCtx*/,
 		const FSourceControlOperationRef& /*InOperation*/,
@@ -52,7 +59,7 @@ namespace gitlink::cmd
 
 	auto MoveToChangelist(
 		FCommandContext&                  InCtx,
-		const FSourceControlOperationRef& /*InOperation*/,
+		const FSourceControlOperationRef& InOperation,
 		const TArray<FString>&            InFiles) -> FCommandResult
 	{
 		if (InCtx.Repository == nullptr || !InCtx.Repository->IsOpen())
@@ -109,7 +116,10 @@ namespace gitlink::cmd
 			return FCommandResult::Fail(FText::FromString(OpResult.ErrorMessage));
 		}
 
-		return FCommandResult::Ok();
+		// Re-scan and return changelist states so the View Changes window refreshes
+		// immediately without the user needing to hit Refresh.
+		const TArray<FString> EmptyFiles;
+		return UpdateChangelistsStatus(InCtx, InOperation, EmptyFiles);
 	}
 
 	auto UpdateChangelistsStatus(
