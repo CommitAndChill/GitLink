@@ -62,6 +62,11 @@ public:
 	// On failure (LFS not available, network error), returns an empty map.
 	auto QueryLfsLocks_Local() -> TMap<FString, FString>;
 
+	// Queries ALL LFS locks (local + remote) via `git lfs locks`. This is a network call
+	// that contacts the LFS server. Returns a map of repo-relative paths to lock owner names.
+	// Used to detect files locked by OTHER users (LockedOther state).
+	auto QueryLfsLocks_Remote() -> TMap<FString, FString>;
+
 	// Runs `git <args>` and writes stdout (binary-safe) to InOutputFile.
 	// Used by FGitLink_Revision::Get to extract file content at a specific commit.
 	// Returns true on success (exit code 0).

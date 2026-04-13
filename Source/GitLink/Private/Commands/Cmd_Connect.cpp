@@ -141,19 +141,30 @@ namespace gitlink::cmd
 			if (bLockable) { ++LockableCount; }
 		}
 
-		// Stage 3: query existing LFS locks so reconnecting doesn't lose lock state.
-		// Without this, a reconnect after a successful checkout would reset Lock to NotLocked
-		// and the editor would try to check out again (failing with "Lock exists").
+		// Stage 3: query LFS locks (both local and remote) so the editor shows accurate lock
+		// state from the start — including files locked by OTHER users.
+		//
+		// We query both --local (our locks, instant) and remote (all locks, network call), then
+		// classify by path membership: if a remote lock's path is also in the local set, it's
+		// ours (Locked); otherwise it's someone else's (LockedOther). This avoids comparing
+		// usernames, which can differ between git config user.name and the LFS server identity.
 		if (InCtx.Subprocess != nullptr && InCtx.Subprocess->IsValid() && InCtx.Provider.Is_LfsAvailable())
 		{
-			const TMap<FString, FString> LocalLocks = InCtx.Subprocess->QueryLfsLocks_Local();
-			const FString& CurrentUser = InCtx.Provider.Get_UserName();
-			int32 LockCount = 0;
+			const TMap<FString, FString> LocalLocks  = InCtx.Subprocess->QueryLfsLocks_Local();
+			const TMap<FString, FString> RemoteLocks = InCtx.Subprocess->QueryLfsLocks_Remote();
 
-			for (const auto& [RelPath, LockOwner] : LocalLocks)
+			int32 OurLockCount   = 0;
+			int32 OtherLockCount = 0;
+
+			for (const auto& [RelPath, LockOwner] : RemoteLocks)
 			{
 				const FString Absolute = Normalize_AbsolutePath(
 					FPaths::Combine(InCtx.RepoRootAbsolute, RelPath));
+
+				const bool bIsOurs = LocalLocks.Contains(RelPath);
+				const EGitLink_LockState LockState = bIsOurs
+					? EGitLink_LockState::Locked
+					: EGitLink_LockState::LockedOther;
 
 				// Find or create a state entry for this locked file.
 				bool bFound = false;
@@ -161,7 +172,7 @@ namespace gitlink::cmd
 				{
 					if (State->GetFilename().Equals(Absolute, ESearchCase::IgnoreCase))
 					{
-						State->_State.Lock     = EGitLink_LockState::Locked;
+						State->_State.Lock     = LockState;
 						State->_State.LockUser = LockOwner;
 						bFound = true;
 						break;
@@ -170,23 +181,22 @@ namespace gitlink::cmd
 
 				if (!bFound)
 				{
-					// File is locked but wasn't in the dirty or tracked scan — add it.
 					FGitLink_CompositeState Composite;
 					Composite.File     = EGitLink_FileState::Unknown;
 					Composite.Tree     = EGitLink_TreeState::Unmodified;
-					Composite.Lock     = EGitLink_LockState::Locked;
+					Composite.Lock     = LockState;
 					Composite.LockUser = LockOwner;
 					Result.UpdatedStates.Add(Make_FileState(Absolute, Composite));
 				}
 
-				++LockCount;
+				if (bIsOurs) { ++OurLockCount; } else { ++OtherLockCount; }
 			}
 
-			if (LockCount > 0)
+			if (OurLockCount > 0 || OtherLockCount > 0)
 			{
 				UE_LOG(LogGitLink, Log,
-					TEXT("Cmd_Connect: discovered %d existing LFS lock(s) held locally"),
-					LockCount);
+					TEXT("Cmd_Connect: discovered %d lock(s) held by us, %d by others"),
+					OurLockCount, OtherLockCount);
 			}
 		}
 
