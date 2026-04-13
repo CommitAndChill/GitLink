@@ -92,7 +92,16 @@ At connect time, `git_submodule_foreach` enumerates submodule paths stored on th
 
 ## Remaining Work
 
-- **CheckIn (submit)** — `Cmd_CheckIn.cpp` exists but is untested end-to-end (stage + commit + push + unlock from View Changes)
-- **Named changelists** — `.git/gitlink/changelists.json` persistence via `GitLink_Changelists_Store` (currently stubs)
+### Functional (v1 complete — these are polish/v2)
+
+- **View Changes auto-refresh on file modification** — Currently requires manual Refresh after modifying and saving files. The existing GitSourceControl plugin refreshes within 1–2 seconds. Could be addressed by having the background poll (currently 30s) trigger `UpdateChangelistsStatus`, or by shortening the poll interval when the View Changes window is open.
+- **Revision Control toolbar buttons** — The existing plugin adds 4 custom commands to the bottom-right SCC menu: Push pending local commits, Pull, Revert, Refresh. These are plugin-specific UI registrations (custom `SExtensionButton` entries in the module startup) — not part of the SCC command framework.
+- **Named changelists** — `.git/gitlink/changelists.json` persistence via `GitLink_Changelists_Store` (currently stubs). `NewChangelist`, `DeleteChangelist`, `EditChangelist` all return Ok without doing anything.
+- **`lockable_exts=0`** — `ProbeLockableExtensions` returns empty; falls back to hardcoded extensions. Works but should be investigated — likely a `.gitattributes` parsing issue or the LFS attribute query not finding `lockable` patterns.
 - **Unit tests** — `GitLinkTests` module (planned but not created)
-- **`lockable_exts=0`** — `ProbeLockableExtensions` returns empty; falls back to hardcoded extensions (works but should be investigated)
+
+### Known quirks (acceptable for v1)
+
+- **CheckIn stages only the selected changelist** — When submitting from a specific changelist, files from other changelists are temporarily unstaged before commit, then re-staged after. This is necessary because `git commit` (via libgit2) always commits the entire index. The existing plugin avoids this by using `git commit -- <files>` via subprocess, which auto-scopes to those files.
+- **"Working changes" as default submit description** — The submit dialog pre-fills the changelist name as the commit description. This is standard UE behavior for all SCC plugins with changelists — users overwrite it with their actual message.
+- **Checkout dialog on save after Init(force=true)** — When opening certain assets, the editor fires Init(force=true) which rebuilds the state cache. If the lock state hasn't been applied yet, CanCheckout briefly returns true. Mitigated by carrying forward existing lock state in UpdateStatus/UpdateChangelistsStatus.
