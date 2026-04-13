@@ -3,6 +3,7 @@
 #include "GitLinkLog.h"
 
 #include <Features/IModularFeatures.h>
+#include <Interfaces/IPluginManager.h>
 #include <ISourceControlModule.h>
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -11,7 +12,17 @@
 
 auto FGitLinkModule::StartupModule() -> void
 {
-	UE_LOG(LogGitLink, Log, TEXT("GitLink: module startup"));
+	// Log the plugin version from the .uplugin descriptor so it's easy to identify which build
+	// is running when reading logs. Matches the pattern used by GitSourceControl.
+	const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("GitLink"));
+	if (Plugin.IsValid())
+	{
+		UE_LOG(LogGitLink, Log, TEXT("GitLink v%s: module startup"), *Plugin->GetDescriptor().VersionName);
+	}
+	else
+	{
+		UE_LOG(LogGitLink, Log, TEXT("GitLink: module startup"));
+	}
 
 	// Register the provider as a modular feature so ISourceControlModule can discover it and
 	// offer it in the revision-control provider dropdown. Registration must come BEFORE the

@@ -29,40 +29,68 @@ namespace gitlink
 	public:
 		virtual ~IRepository() = default;
 
-		// Query
+		// Query --------------------------------------------------------------------------------------------------------
+
+		/** Absolute path to the working tree root (not the .git directory). */
 		virtual auto Get_Path() const -> const FString& = 0;
+
+		/** True if the underlying git_repository* is valid and usable. */
 		virtual auto IsOpen()  const -> bool = 0;
 
-		// Status
+		// Status --------------------------------------------------------------------------------------------------------
+
+		/** Run a fresh `git status` scan and return staged/unstaged/conflicted file lists. Thread-safe. */
 		virtual auto Get_Status() -> FStatus = 0;
 
-		// Index manipulation
+		// Index manipulation --------------------------------------------------------------------------------------------
+
+		/** Stage files by repo-relative paths (equivalent to `git add`). Paths must be relative to the repo root. */
 		virtual auto Stage         (const TArray<FString>& InPaths) -> FResult = 0;
+
+		/** Unstage files by repo-relative paths (equivalent to `git restore --staged`). */
 		virtual auto Unstage       (const TArray<FString>& InPaths) -> FResult = 0;
+
+		/** Stage all dirty files in the working tree. Caution: also stages submodule directories. */
 		virtual auto StageAll      ()                              -> FResult = 0;
+
+		/** Unstage everything — resets the entire index to HEAD. */
 		virtual auto UnstageAll    ()                              -> FResult = 0;
+
+		/** Discard working-tree changes for the given repo-relative paths (equivalent to `git checkout HEAD -- <paths>`). */
 		virtual auto DiscardChanges(const TArray<FString>& InPaths) -> FResult = 0;
 
-		// Commits
+		// Commits -------------------------------------------------------------------------------------------------------
+
+		/** Create a commit from the current index. See FCommitParams for author/message/amend options. */
 		virtual auto Commit(const FCommitParams& InParams) -> FResult = 0;
 
-		// History
+		// History -------------------------------------------------------------------------------------------------------
+
+		/** Walk the commit log starting from InQuery.StartRef (default HEAD). */
 		virtual auto Get_Log(const FLogQuery& InQuery) -> TArray<FCommit> = 0;
 
-		// Branches
+		// Branches ------------------------------------------------------------------------------------------------------
+
+		/** Enumerate all local and remote-tracking branches. */
 		virtual auto Get_Branches()            -> TArray<FBranch> = 0;
+
+		/** Short name of the currently checked-out branch (e.g. "main"). */
 		virtual auto Get_CurrentBranchName()   -> FString         = 0;
 
-		// Remotes
+		// Remotes -------------------------------------------------------------------------------------------------------
+
+		/** Enumerate all configured remotes (name + fetch/push URLs). */
 		virtual auto Get_Remotes() -> TArray<FRemote> = 0;
 
-		// Network
+		// Network -------------------------------------------------------------------------------------------------------
+
+		/** Fetch from a remote. Runs the transfer on the calling thread with optional progress callback. */
 		virtual auto Fetch(const FFetchParams& InParams, FProgressCallback InProgress = nullptr) -> FResult = 0;
+
+		/** Push to a remote. Runs the transfer on the calling thread with optional progress callback. */
 		virtual auto Push (const FPushParams&  InParams, FProgressCallback InProgress = nullptr) -> FResult = 0;
 
-		// Fetch + fast-forward HEAD to its upstream. Returns a failing FResult if the merge
-		// would require anything more complex than a fast-forward (divergent history, merge
-		// commit required, etc.) — v1 callers must resolve non-FF pulls manually.
+		/** Fetch + fast-forward HEAD to its upstream. Fails if the merge requires more than a fast-forward. */
 		virtual auto PullFastForward(const FFetchParams& InParams, FProgressCallback InProgress = nullptr) -> FResult = 0;
 	};
 

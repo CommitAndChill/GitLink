@@ -59,7 +59,10 @@ public:
 		return GetTypeHash(InChangelist._Name);
 	}
 
+	/** Default changelist for unstaged working-tree changes. Maps to git's working tree. */
 	static FGitLink_Changelist WorkingChangelist;
+
+	/** Default changelist for staged (indexed) changes. Maps to git's staging area. */
 	static FGitLink_Changelist StagedChangelist;
 
 private:

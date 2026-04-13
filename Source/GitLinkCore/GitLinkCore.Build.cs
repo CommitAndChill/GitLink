@@ -7,7 +7,6 @@ public class GitLinkCore : ModuleRules
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 		IWYUSupport = IWYUSupport.Full;
-		bUseUnity = false;
 
 		// Make the module root (where GitLinkCore_Module.h and GitLinkCoreLog.h live) findable
 		// from .cpp files inside Private/. UBT only adds Public/ and Private/ automatically.

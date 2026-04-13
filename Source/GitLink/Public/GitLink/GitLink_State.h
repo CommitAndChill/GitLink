@@ -81,16 +81,18 @@ enum class EGitLink_RemoteState : uint8
 	NotLatest,
 };
 
-// Combined view — the only thing stored in the state cache per file.
+/// Combined per-file state — the only thing stored in the state cache per file.
+/// Each dimension is independent: File tracks the diff type, Tree tracks the staging location,
+/// Lock tracks LFS lock ownership, and Remote tracks whether the file is at the latest revision.
 struct FGitLink_CompositeState
 {
-	EGitLink_FileState   File   = EGitLink_FileState::Unknown;
-	EGitLink_TreeState   Tree   = EGitLink_TreeState::NotInRepo;
-	EGitLink_LockState   Lock   = EGitLink_LockState::Unknown;
-	EGitLink_RemoteState Remote = EGitLink_RemoteState::UpToDate;
+	EGitLink_FileState   File   = EGitLink_FileState::Unknown;   ///< What kind of change (added/modified/deleted/etc).
+	EGitLink_TreeState   Tree   = EGitLink_TreeState::NotInRepo; ///< Where in the git workflow (working/staged/untracked).
+	EGitLink_LockState   Lock   = EGitLink_LockState::Unknown;   ///< LFS lock state (locked by us, by other, not locked).
+	EGitLink_RemoteState Remote = EGitLink_RemoteState::UpToDate; ///< Relationship to the remote tracking branch.
 
-	FString LockUser;    // owner of an LFS lock, if any
-	FString HeadBranch;  // branch that holds the latest modification, if ahead
+	FString LockUser;    ///< Owner of an LFS lock, if any (display name from the LFS server).
+	FString HeadBranch;  ///< Branch that holds a newer version, if Remote != UpToDate.
 };
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -157,15 +159,15 @@ public:
 	auto IsConflicted     () const -> bool override;
 	auto CanRevert        () const -> bool override;
 
-	// Internal helpers
+	/// Collapse the composite state into a single priority enum for icon + tooltip display.
 	auto Get_OverallStatus() const -> EGitLink_Status;
 
-	// Public fields — populated by Cmd_UpdateStatus from gitlink::FFileChange.
-	FGitLink_History        _History;
-	FString                 _LocalFilename;
-	FGitLink_CompositeState _State;
-	FGitLink_Changelist     _Changelist;
-	FDateTime               _TimeStamp = FDateTime(0);
+	// Public fields — populated by Cmd_UpdateStatus / Cmd_Changelists from gitlink::FFileChange.
+	FGitLink_History        _History;         ///< Per-file commit history (newest first).
+	FString                 _LocalFilename;   ///< Absolute path to the file on disk.
+	FGitLink_CompositeState _State;           ///< Combined file/tree/lock/remote status.
+	FGitLink_Changelist     _Changelist;      ///< Which changelist this file belongs to (Working or Staged).
+	FDateTime               _TimeStamp = FDateTime(0); ///< When this state was last refreshed.
 
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
 	FResolveInfo            _PendingResolveInfo;

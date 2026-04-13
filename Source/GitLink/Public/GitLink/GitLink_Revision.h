@@ -39,18 +39,18 @@ public:
 	auto GetCheckInIdentifier() const -> int32            override { return _CheckInIdentifier; }
 	auto GetFileSize         () const -> int32            override { return _FileSize;    }
 
-	// Public fields so Cmd_UpdateStatus / Cmd_History can populate directly.
-	FString    _Filename;
-	FString    _CommitId;           // full 40-char hex
-	FString    _ShortCommitId;      // 7-char
-	FString    _Description;
-	FString    _UserName;
-	FString    _ClientSpec;
-	FString    _Action;
-	FDateTime  _Date               = FDateTime::MinValue();
-	int32      _RevisionNumber     = 0;
-	int32      _CheckInIdentifier  = 0;
-	int32      _FileSize           = 0;
+	// Public fields — populated by Cmd_UpdateStatus / Cmd_History.
+	FString    _Filename;           ///< Absolute path to the file this revision belongs to.
+	FString    _CommitId;           ///< Full 40-character hex commit hash.
+	FString    _ShortCommitId;      ///< Abbreviated 7-character commit hash (displayed in UI).
+	FString    _Description;        ///< Commit message summary (first line).
+	FString    _UserName;           ///< Author name from git signature.
+	FString    _ClientSpec;         ///< Unused (Perforce compat); always empty.
+	FString    _Action;             ///< "add", "edit", "delete" — file-level action in this commit.
+	FDateTime  _Date               = FDateTime::MinValue(); ///< Author timestamp of the commit.
+	int32      _RevisionNumber     = 0;   ///< Sequential revision index (newest = 0).
+	int32      _CheckInIdentifier  = 0;   ///< Unused (Perforce compat); always 0.
+	int32      _FileSize           = 0;   ///< File size in bytes at this revision (0 if unknown).
 };
 
 using FGitLink_RevisionRef = TSharedRef<FGitLink_Revision, ESPMode::ThreadSafe>;
