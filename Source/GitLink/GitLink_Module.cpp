@@ -13,7 +13,7 @@
 auto FGitLinkModule::StartupModule() -> void
 {
 	// Log the plugin version from the .uplugin descriptor so it's easy to identify which build
-	// is running when reading logs. Matches the pattern used by GitSourceControl.
+	// is running when reading logs.
 	const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("GitLink"));
 	if (Plugin.IsValid())
 	{

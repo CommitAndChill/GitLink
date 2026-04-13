@@ -4,7 +4,7 @@ Drop-in location for the prebuilt libgit2 shared library that `GitLinkCore` link
 
 ## Target version
 
-**libgit2 v1.9.0** — matches the version used by `FtxCatalyst/libs/GitKit` so behaviour stays consistent across projects.
+**libgit2 v1.9.0**
 
 ## Expected layout (Win64)
 
@@ -60,7 +60,7 @@ Because UBT does not track `File.Exists()` in `Build.cs` as a build input, after
 
 ## Why WinHTTP instead of OpenSSL
 
-Avoids vendoring OpenSSL alongside libgit2 and picks up Windows trust store + proxy settings automatically. Matches how the existing `GitSourceControl` plugin ships.
+Avoids vendoring OpenSSL alongside libgit2 and picks up Windows trust store + proxy settings automatically.
 
 ## Mac / Linux
 

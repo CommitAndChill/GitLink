@@ -10,7 +10,6 @@ GitLink is a clean-room Unreal source control plugin using libgit2 in-process, w
 - `Get_` / `Set_` / `Is_` / `Request_` method prefixes
 - Early-return inverted-if style
 - `auto` for local variables
-- No `Ck` or `ck` prefix/namespace anywhere — brand-neutral
 - `namespace gitlink` for core types, `namespace gitlink::cmd` for commands, `namespace gitlink::op` for core operations
 
 ## Architecture
@@ -71,7 +70,7 @@ At connect time, `git_submodule_foreach` enumerates submodule paths stored on th
 
 - **UpdateChangelistsStatus** runs a fresh `Repository->Get_Status()` (not the stale cache) and assigns dirty Content/ files to Working or Staged changelists.
 - **MoveToChangelist** stages (`git add`) or unstages (`git restore --staged`) files, then re-runs `UpdateChangelistsStatus` to refresh the View Changes window immediately.
-- **Working/Staged changelists map 1:1 to git's staging area** — this matches the existing GitSourceControl plugin's behavior.
+- **Working/Staged changelists map 1:1 to git's staging area**.
 
 ## Key Files
 
@@ -109,8 +108,10 @@ At connect time, `git_submodule_foreach` enumerates submodule paths stored on th
 
 ## Build
 
+Build as part of your project's editor target. Example:
+
 ```
-"D:/Repos/UnrealEngine-Angelscript/Engine/Build/BatchFiles/Build.bat" CkPluginsEditor Win64 Development "D:/Repos/CkPlugins2/CkPlugins.uproject" -waitmutex
+"<EnginePath>/Engine/Build/BatchFiles/Build.bat" <ProjectName>Editor Win64 Development "<ProjectPath>/<ProjectName>.uproject" -waitmutex
 ```
 
 Unity build uses project defaults (no explicit `bUseUnity` override in either `.Build.cs`).
@@ -119,16 +120,16 @@ Unity build uses project defaults (no explicit `bUseUnity` override in either `.
 
 ### Polish / v2
 
-- **View Changes auto-refresh on file modification** — Currently requires manual Refresh after modifying and saving files. The existing GitSourceControl plugin refreshes within 1–2 seconds. Could be addressed by having the background poll (currently 30s) trigger `UpdateChangelistsStatus`, or by shortening the poll interval when the View Changes window is open.
-- **Revision Control toolbar buttons** — The existing plugin adds 4 custom commands to the bottom-right SCC menu: Push pending local commits, Pull, Revert, Refresh. These are plugin-specific UI registrations (custom `SExtensionButton` entries in the module startup) — not part of the SCC command framework. FtxCatalyst's GitGraph has similar push/pull/fetch actions behind leader-key commands.
+- **View Changes auto-refresh on file modification** — Currently requires manual Refresh after modifying and saving files. Could be addressed by having the background poll (currently 30s) trigger `UpdateChangelistsStatus`, or by shortening the poll interval when the View Changes window is open.
+- **Revision Control toolbar buttons** — 4 custom commands in the bottom-right SCC menu: Push pending local commits, Pull, Revert, Refresh. These are plugin-specific UI registrations (custom `SExtensionButton` entries in the module startup) — not part of the SCC command framework.
 - **Named changelists** — `.git/gitlink/changelists.json` persistence via `GitLink_Changelists_Store` (currently stubs). `NewChangelist`, `DeleteChangelist`, `EditChangelist` all return Ok without doing anything.
 - **`lockable_exts=0`** — `ProbeLockableExtensions` returns empty; falls back to hardcoded extensions. Works but should be investigated — likely a `.gitattributes` parsing issue or the LFS attribute query not finding `lockable` patterns.
-- **Conflict resolution** — `Cmd_Resolve.cpp` exists but is a stub. FtxCatalyst's GitKit has `ResolveConflict_Ours`, `ResolveConflict_Theirs`, and `LaunchMergeTool` — similar resolve-by-strategy could be wired into the UE SCC resolve flow.
-- **Stash support** — FtxCatalyst's GitKit exposes full stash create/apply/drop. UE's SCC framework doesn't have a stash concept, but a custom toolbar button or command could expose it.
+- **Conflict resolution** — `Cmd_Resolve.cpp` stages conflicted files but doesn't offer resolve-by-strategy (ours/theirs/merge tool). Could be wired into the UE SCC resolve flow.
+- **Stash support** — UE's SCC framework doesn't have a stash concept, but a custom toolbar button or command could expose git stash create/apply/drop.
 - **Unit tests** — `GitLinkTests` module (planned but not created)
 
 ### Known quirks (acceptable for v1)
 
-- **CheckIn stages only the selected changelist** — When submitting from a specific changelist, files from other changelists are temporarily unstaged before commit, then re-staged after. This is necessary because `git commit` (via libgit2) always commits the entire index. The existing plugin avoids this by using `git commit -- <files>` via subprocess, which auto-scopes to those files.
+- **CheckIn stages only the selected changelist** — When submitting from a specific changelist, files from other changelists are temporarily unstaged before commit, then re-staged after. This is necessary because `git commit` (via libgit2) always commits the entire index. A subprocess-based `git commit -- <files>` would auto-scope, but we prefer in-process commits for speed.
 - **"Working changes" as default submit description** — The submit dialog pre-fills the changelist name as the commit description. This is standard UE behavior for all SCC plugins with changelists — users overwrite it with their actual message.
 - **Checkout dialog on save after Init(force=true)** — When opening certain assets, the editor fires Init(force=true) which rebuilds the state cache. If the lock state hasn't been applied yet, CanCheckout briefly returns true. Mitigated by carrying forward existing lock state in UpdateStatus/UpdateChangelistsStatus.

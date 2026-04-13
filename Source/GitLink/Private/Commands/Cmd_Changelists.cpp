@@ -146,7 +146,7 @@ namespace gitlink::cmd
 		AppendBucket(Snapshot.Conflicted, EStatusBucket::Conflicted, InCtx.RepoRootAbsolute, CompositeByPath);
 
 		// Content directory suffix — only files under a /Content/ directory are shown in
-		// View Changes, matching the existing GitSourceControl plugin's behaviour.
+		// View Changes.
 		const FString ContentPathSegment = TEXT("/Content/");
 		const FDateTime Now = FDateTime::UtcNow();
 

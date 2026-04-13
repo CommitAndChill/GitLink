@@ -15,8 +15,8 @@ namespace gitlink { class FRepository; }
 
 // --------------------------------------------------------------------------------------------------------------------
 // FGitLink_CommandDispatcher — routes FSourceControlOperation instances to free-function handlers
-// living under Private/Commands/Cmd_*.cpp in namespace gitlink::cmd. Replaces the 13-subclass
-// IGitSourceControlWorker hierarchy in the existing plugin with a flat FName -> TFunction map.
+// living under Private/Commands/Cmd_*.cpp in namespace gitlink::cmd. Uses a flat FName -> TFunction
+// map rather than a worker class hierarchy.
 //
 // Execution model (v1):
 //   - EConcurrency::Synchronous : runs the handler inline on the calling thread

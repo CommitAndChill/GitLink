@@ -12,9 +12,8 @@
 // FGitLink_FileState — translates the composite (FileState x TreeState x LockState x RemoteState)
 // into the boolean predicates that Unreal's source control UI asks.
 //
-// The mapping mirrors what the existing GitSourceControl plugin does: the priority order of the
-// tests matters because a file can be in multiple states at once (e.g. staged + modified since
-// staging), and we have to pick ONE status to report.
+// The priority order of the tests matters because a file can be in multiple states at once
+// (e.g. staged + modified since staging), and we have to pick ONE status to report.
 // --------------------------------------------------------------------------------------------------------------------
 
 auto FGitLink_FileState::Get_OverallStatus() const -> EGitLink_Status

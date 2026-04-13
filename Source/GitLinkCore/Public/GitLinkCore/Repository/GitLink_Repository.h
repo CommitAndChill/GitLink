@@ -150,7 +150,7 @@ namespace gitlink
 		git_repository* _Repo = nullptr;
 
 		// FCriticalSection is recursive on all platforms UE ships on (CRITICAL_SECTION on Win,
-		// PTHREAD_MUTEX_RECURSIVE elsewhere), which matches the FtxCatalyst GitKit pattern.
+		// PTHREAD_MUTEX_RECURSIVE elsewhere).
 		mutable FCriticalSection _RepoMutex;
 	};
 }

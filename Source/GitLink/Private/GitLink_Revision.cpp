@@ -13,8 +13,7 @@
 // FGitLink_Revision::Get — extracts the file content at this revision to a temp file so the
 // editor can diff it against the current working copy or another revision.
 //
-// Uses `git cat-file --filters <commit>:<repo-relative-path>` via subprocess, matching what
-// the existing GitSourceControl plugin does.
+// Uses `git cat-file --filters <commit>:<repo-relative-path>` via subprocess.
 // --------------------------------------------------------------------------------------------------------------------
 
 #if ENGINE_MAJOR_VERSION >= 5
