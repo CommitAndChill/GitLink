@@ -38,7 +38,7 @@ The **destination changelist** is threaded through `Provider::Execute` → `Disp
 
 State predicates (`CanCheckout`, `CanRevert`, `IsCheckedOut`, etc.) are on `FGitLink_FileState` and drive every right-click menu option and content browser icon.
 
-**Lock state preservation**: `UpdateStatus` and `UpdateChangelistsStatus` carry forward existing lock state from the cache instead of blindly stamping `NotLocked`. Lock state is owned exclusively by `Cmd_CheckOut` (sets Locked), `Cmd_Revert` (sets NotLocked after unlock), and `Cmd_Connect` Stage 3 (discovers existing locks).
+**Lock state preservation**: `UpdateStatus` and `UpdateChangelistsStatus` carry forward existing lock state from the cache instead of blindly stamping `NotLocked`. Lock state is owned exclusively by `Cmd_CheckOut` (sets Locked), `Cmd_Revert` (sets NotLocked after unlock), `Cmd_Connect` Stage 3 (discovers all locks), and the remote lock refresh in `Cmd_UpdateStatus` (detects LockedOther).
 
 ### LFS Locking
 
@@ -47,6 +47,7 @@ State predicates (`CanCheckout`, `CanRevert`, `IsCheckedOut`, etc.) are on `FGit
 - **CheckIn** = stage + commit + unlock. Respects `KeepCheckedOut` checkbox.
 - **Idempotent checkout**: "Lock exists" is treated as success (file already locked by us).
 - **No `--force` on unlock**: Callers always discard/commit before unlocking, so the working tree is clean. Omitting `--force` avoids the "admin access" error that occurs when the LFS server identity (GitHub username) differs from `git config user.name`.
+- **Remote lock polling**: Every background poll (30s), `Cmd_UpdateStatus` in full-scan mode queries `git lfs locks` (remote) and `git lfs locks --local` to classify all locks as `Locked` (ours) or `LockedOther` (someone else). Uses path membership (local ∩ remote) rather than username comparison to avoid identity mismatches between git config user.name and the LFS server identity. Also detects released locks — files that were Locked/LockedOther in the cache but no longer appear in the remote set are reset to NotLocked.
 
 ### CheckIn (Submit)
 
@@ -82,11 +83,11 @@ At connect time, `git_submodule_foreach` enumerates submodule paths stored on th
 | `GitLink_State.h/cpp` | FGitLink_FileState predicates (CanCheckout, IsModified, etc.) |
 | `GitLink_Subprocess.h/cpp` | git.exe wrapper for LFS, check-attr, RunToFile, QueryLfsLocks_Local |
 | `GitLink_Revision.h/cpp` | ISourceControlRevision with Get() for diff |
-| `Cmd_Connect.cpp` | Repo open, status scan, LFS lock discovery, submodule enumeration |
+| `Cmd_Connect.cpp` | Repo open, status scan, LFS lock discovery (local + remote), submodule enumeration |
 | `Cmd_CheckOut.cpp` | LFS lock + writable + idempotent |
 | `Cmd_Revert.cpp` | Discard + unlock with modified/locked-only separation |
 | `Cmd_CheckIn.cpp` | Stage + commit + unlock with changelist scoping, KeepCheckedOut, cross-CL isolation |
-| `Cmd_UpdateStatus.cpp` | Status scan, history building (parent + submodule repos), lock state preservation |
+| `Cmd_UpdateStatus.cpp` | Status scan, history building (parent + submodule repos), lock state preservation, remote lock polling (LockedOther detection) |
 | `Cmd_Changelists.cpp` | UpdateChangelistsStatus (fresh scan), MoveToChangelist (stage/unstage + refresh) |
 | `Cmd_Shared.h` | Path helpers, Make_FileState, Release_LfsLocksBestEffort, status-mapping helpers |
 

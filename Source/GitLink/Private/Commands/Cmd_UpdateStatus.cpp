@@ -243,6 +243,108 @@ namespace gitlink::cmd
 			{
 				Result.UpdatedStates.Add(BuildState(Pair.Key, Pair.Value));
 			}
+
+			// Refresh LFS lock state from the remote so we detect files locked by other users.
+			// Only runs in full-scan mode (empty InFiles), which is what the background poll
+			// dispatches every 30 seconds. File-specific status queries (e.g. editor opening a
+			// folder) skip this to avoid a network call on every Content Browser navigation.
+			if (InCtx.Subprocess != nullptr && InCtx.Subprocess->IsValid() && InCtx.Provider.Is_LfsAvailable())
+			{
+				const TMap<FString, FString> LocalLocks  = InCtx.Subprocess->QueryLfsLocks_Local();
+				const TMap<FString, FString> RemoteLocks = InCtx.Subprocess->QueryLfsLocks_Remote();
+
+				int32 LockChanges = 0;
+
+				for (const auto& [RelPath, LockOwner] : RemoteLocks)
+				{
+					const FString Absolute = Normalize_AbsolutePath(
+						FPaths::Combine(InCtx.RepoRootAbsolute, RelPath));
+
+					const bool bIsOurs = LocalLocks.Contains(RelPath);
+					const EGitLink_LockState NewLockState = bIsOurs
+						? EGitLink_LockState::Locked
+						: EGitLink_LockState::LockedOther;
+
+					// Check if this lock is already correctly represented in our emitted states.
+					bool bAlreadyEmitted = false;
+					for (const FGitLink_FileStateRef& State : Result.UpdatedStates)
+					{
+						if (State->GetFilename().Equals(Absolute, ESearchCase::IgnoreCase))
+						{
+							if (State->_State.Lock != NewLockState || State->_State.LockUser != LockOwner)
+							{
+								State->_State.Lock     = NewLockState;
+								State->_State.LockUser = LockOwner;
+								++LockChanges;
+							}
+							bAlreadyEmitted = true;
+							break;
+						}
+					}
+
+					if (!bAlreadyEmitted)
+					{
+						// File is locked but not dirty — check if cache already has the right state.
+						const FGitLink_FileStateRef Existing = InCtx.StateCache.Find_FileState(Absolute);
+						if (Existing->_State.Lock != NewLockState || Existing->_State.LockUser != LockOwner)
+						{
+							FGitLink_CompositeState Composite = Existing->_State;
+							Composite.Lock     = NewLockState;
+							Composite.LockUser = LockOwner;
+
+							// Ensure tree state is reasonable for a clean locked file.
+							if (Composite.Tree == EGitLink_TreeState::NotInRepo)
+							{
+								Composite.Tree = EGitLink_TreeState::Unmodified;
+							}
+
+							Result.UpdatedStates.Add(Make_FileState(Absolute, Composite));
+							++LockChanges;
+						}
+					}
+				}
+
+				// Also check for locks that were RELEASED since last poll — files that were
+				// LockedOther (or Locked) in the cache but are no longer in the remote lock set.
+				// Build a set of currently-locked absolute paths for fast lookup.
+				TSet<FString> RemoteLockAbsolutes;
+				RemoteLockAbsolutes.Reserve(RemoteLocks.Num());
+				for (const auto& [RelPath, _] : RemoteLocks)
+				{
+					RemoteLockAbsolutes.Add(Normalize_AbsolutePath(
+						FPaths::Combine(InCtx.RepoRootAbsolute, RelPath)));
+				}
+
+				const TArray<FGitLink_FileStateRef> LockedStates = InCtx.StateCache.Enumerate_FileStates(
+					[](const FGitLink_FileStateRef& InState)
+					{
+						return InState->_State.Lock == EGitLink_LockState::Locked
+							|| InState->_State.Lock == EGitLink_LockState::LockedOther;
+					});
+				for (const FGitLink_FileStateRef& Cached : LockedStates)
+				{
+
+					if (RemoteLockAbsolutes.Contains(Cached->GetFilename()))
+					{ continue; }
+
+					// Lock was released — update to NotLocked (or Unlockable if not lockable).
+					const bool bLockable = InCtx.Provider.Is_FileLockable(Cached->GetFilename());
+
+					FGitLink_CompositeState Composite = Cached->_State;
+					Composite.Lock     = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
+					Composite.LockUser.Reset();
+
+					Result.UpdatedStates.Add(Make_FileState(Cached->GetFilename(), Composite));
+					++LockChanges;
+				}
+
+				if (LockChanges > 0)
+				{
+					UE_LOG(LogGitLink, Log,
+						TEXT("Cmd_UpdateStatus: remote lock refresh — %d lock state change(s)"),
+						LockChanges);
+				}
+			}
 		}
 		else
 		{

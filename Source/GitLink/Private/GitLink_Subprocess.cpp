@@ -232,6 +232,49 @@ auto FGitLink_Subprocess::QueryLfsLocks_Local() -> TMap<FString, FString>
 	return Out;
 }
 
+auto FGitLink_Subprocess::QueryLfsLocks_Remote() -> TMap<FString, FString>
+{
+	TMap<FString, FString> Out;
+	if (!IsValid())
+	{ return Out; }
+
+	// `git lfs locks` (no --local) queries the remote LFS server for ALL locks.
+	// Output format is identical to --local: tab-separated path, owner, id.
+	const FGitLink_SubprocessResult Result = RunLfs({ TEXT("locks") });
+	if (!Result.IsSuccess())
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("QueryLfsLocks_Remote: git lfs locks failed: %s"),
+			*Result.Get_CombinedError());
+		return Out;
+	}
+
+	TArray<FString> Lines;
+	Result.StdOut.ParseIntoArrayLines(Lines, /*bCullEmpty=*/ true);
+
+	for (const FString& Line : Lines)
+	{
+		FString Trimmed = Line.TrimStartAndEnd();
+		if (Trimmed.IsEmpty())
+		{ continue; }
+
+		TArray<FString> Parts;
+		Trimmed.ParseIntoArray(Parts, TEXT("\t"), /*bCullEmpty=*/ true);
+
+		if (Parts.Num() >= 2)
+		{
+			FString Path  = Parts[0].TrimStartAndEnd();
+			FString Owner = Parts[1].TrimStartAndEnd();
+
+			Path.ReplaceInline(TEXT("\\"), TEXT("/"));
+
+			Out.Add(MoveTemp(Path), MoveTemp(Owner));
+		}
+	}
+
+	return Out;
+}
+
 auto FGitLink_Subprocess::RunToFile(const TArray<FString>& InArgs, const FString& InOutputFile,
 	const FString& InWorkingDirOverride) -> bool
 {
