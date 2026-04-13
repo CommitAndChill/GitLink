@@ -1,37 +1,38 @@
 #pragma once
 
 #include <CoreMinimal.h>
-#include <Containers/Ticker.h>
 
 class FGitLink_Provider;
 
 // --------------------------------------------------------------------------------------------------------------------
-// FGitLink_BackgroundPoll — periodically fetches from origin and refreshes the file status
-// cache so the editor's content browser markers stay current as files change on disk or as
-// other team members push commits.
+// FGitLink_BackgroundPoll — periodically refreshes the file status cache and LFS lock state
+// so the editor's content browser markers stay current as files change on disk or as other
+// team members lock/unlock files.
+//
+// Driven by the provider's Tick() (called every frame by ISourceControlModule) rather than
+// FTSTicker, which avoids ticker handle issues when the provider re-initializes mid-session.
 //
 // Lifecycle:
-//   - Constructed by FGitLink_Provider::Init after the repo is open
-//   - Start() registers a FTSTicker delegate on the game thread
-//   - Stop() unregisters it (idempotent)
+//   - Constructed by FGitLink_Provider::CheckRepositoryStatus after the repo is open
+//   - Tick() called from FGitLink_Provider::Tick() every frame
 //   - Destroyed by FGitLink_Provider::Close
-//
-// Both Fetch and UpdateStatus are dispatched through the normal command dispatcher so they
-// share the same threading / state-merge / broadcast path as user-initiated operations.
 // --------------------------------------------------------------------------------------------------------------------
 
 class FGitLink_BackgroundPoll
 {
 public:
 	explicit FGitLink_BackgroundPoll(FGitLink_Provider& InOwner);
-	~FGitLink_BackgroundPoll();
+	~FGitLink_BackgroundPoll() = default;
 
 	FGitLink_BackgroundPoll(const FGitLink_BackgroundPoll&)            = delete;
 	FGitLink_BackgroundPoll& operator=(const FGitLink_BackgroundPoll&) = delete;
 
-	auto Start(float InIntervalSeconds) -> void;
-	auto Stop() -> void;
-	auto IsRunning() const -> bool { return _TickerHandle.IsValid(); }
+	auto SetInterval(float InIntervalSeconds) -> void;
+	auto IsEnabled() const -> bool { return _IntervalSeconds > 0.f; }
+
+	// Called every frame from the provider's Tick(). Accumulates time and dispatches
+	// a status refresh when the interval is reached.
+	auto Tick(float InDeltaTime) -> void;
 
 	// Temporarily pauses the poll for the duration of the returned scope guard. Used by
 	// commands that modify the working tree (commit, revert) so the poll doesn't race.
@@ -43,10 +44,7 @@ public:
 	};
 
 private:
-	auto OnTick(float InDeltaTime) -> bool;
-
 	FGitLink_Provider& _Owner;
-	FTSTicker::FDelegateHandle _TickerHandle;
 	float _IntervalSeconds = 30.f;
 	float _TimeSinceLastPoll = 0.f;
 	TAtomic<int32> _PauseCount{0};

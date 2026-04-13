@@ -10,6 +10,8 @@
 #include "GitLinkLog.h"
 #include "Slate/SGitLink_Settings.h"
 
+#include <Misc/App.h>
+
 #include "GitLinkCore/Repository/GitLink_Repository.h"
 #include "GitLinkCore/Repository/GitLink_Repository_Params.h"
 #include "GitLinkCore/Types/GitLink_Types.h"
@@ -69,11 +71,7 @@ auto FGitLink_Provider::Close() -> void
 {
 	UE_LOG(LogGitLink, Log, TEXT("FGitLink_Provider::Close"));
 
-	if (_BackgroundPoll.IsValid())
-	{
-		_BackgroundPoll->Stop();
-		_BackgroundPoll.Reset();
-	}
+	_BackgroundPoll.Reset();
 
 	_Repository.Reset();
 	_Subprocess.Reset();
@@ -189,12 +187,19 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		_bHasPreCommitOrCommitMsgHook = HookFlags.NeedsSubprocessForCommit();
 	}
 
-	// Start the background poll if the user has it enabled. This periodically fetches from
-	// origin and refreshes the file-status cache so the content browser stays current.
-	if (Settings != nullptr && Settings->bEnableBackgroundPoll && Settings->PollIntervalSeconds > 0)
+	// Create or reconfigure the background poll. Driven by the provider's Tick() every frame
+	// rather than FTSTicker, which avoids ticker handle issues during Init(force=true) re-init.
+	if (!_BackgroundPoll.IsValid())
 	{
 		_BackgroundPoll = MakeUnique<FGitLink_BackgroundPoll>(*this);
-		_BackgroundPoll->Start(static_cast<float>(Settings->PollIntervalSeconds));
+	}
+	if (Settings != nullptr && Settings->bEnableBackgroundPoll && Settings->PollIntervalSeconds > 0)
+	{
+		_BackgroundPoll->SetInterval(static_cast<float>(Settings->PollIntervalSeconds));
+	}
+	else
+	{
+		_BackgroundPoll->SetInterval(0.f);
 	}
 }
 
@@ -458,9 +463,8 @@ auto FGitLink_Provider::Tick() -> void
 	if (_Dispatcher.IsValid())
 	{ _Dispatcher->Tick(); }
 
-	// Fire any accumulated state-change notifications the commands have queued. In Pass B there
-	// are none; once the dispatcher produces state deltas this will broadcast.
-	// _OnSourceControlStateChanged.Broadcast();
+	if (_BackgroundPoll.IsValid())
+	{ _BackgroundPoll->Tick(FApp::GetDeltaTime()); }
 }
 
 auto FGitLink_Provider::GetLabels(const FString& /*InMatchingSpec*/) const
