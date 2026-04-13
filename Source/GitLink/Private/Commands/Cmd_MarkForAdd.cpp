@@ -1,5 +1,6 @@
 #include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
+#include "GitLinkLog.h"
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
 
@@ -28,9 +29,13 @@ namespace gitlink::cmd
 			return FCommandResult::Ok();
 		}
 
+		UE_LOG(LogGitLink, Log, TEXT("Cmd_MarkForAdd: staging %d file(s)"), InFiles.Num());
+
 		const FResult StageRes = InCtx.Repository->Stage(InFiles);
 		if (!StageRes)
 		{
+			UE_LOG(LogGitLink, Warning,
+				TEXT("Cmd_MarkForAdd: Stage failed: %s"), *StageRes.ErrorMessage);
 			return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
 		}
 

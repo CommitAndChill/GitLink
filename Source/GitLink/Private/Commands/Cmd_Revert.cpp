@@ -1,5 +1,6 @@
 #include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
+#include "GitLinkLog.h"
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
 
@@ -38,6 +39,8 @@ namespace gitlink::cmd
 		{
 			return FCommandResult::Ok();
 		}
+
+		UE_LOG(LogGitLink, Log, TEXT("Cmd_Revert: reverting %d file(s)"), InFiles.Num());
 
 		// Separate files into two buckets: those with local modifications that need a
 		// discard, and those that are only locked (checkout) but not yet modified on disk.
@@ -95,6 +98,8 @@ namespace gitlink::cmd
 			const FResult DiscardRes = InCtx.Repository->DiscardChanges(RelativeModified);
 			if (!DiscardRes)
 			{
+				UE_LOG(LogGitLink, Warning,
+					TEXT("Cmd_Revert: DiscardChanges failed: %s"), *DiscardRes.ErrorMessage);
 				return FCommandResult::Fail(FText::FromString(DiscardRes.ErrorMessage));
 			}
 		}
@@ -112,6 +117,10 @@ namespace gitlink::cmd
 				FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*File, true);
 			}
 		}
+
+		UE_LOG(LogGitLink, Log,
+			TEXT("Cmd_Revert: reverted %d modified, %d locked-only file(s)"),
+			ModifiedFiles.Num(), LockedOnlyFiles.Num());
 
 		FCommandResult Result = FCommandResult::Ok();
 		Result.UpdatedStates.Reserve(InFiles.Num());

@@ -1,5 +1,6 @@
 #include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
+#include "GitLinkLog.h"
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
 
@@ -35,6 +36,8 @@ namespace gitlink::cmd
 			return FCommandResult::Ok();
 		}
 
+		UE_LOG(LogGitLink, Log, TEXT("Cmd_Delete: deleting %d file(s)"), InFiles.Num());
+
 		// Remove files that are still on disk. Tolerate missing files (editor may have already
 		// unlinked them) — the stage step below will pick up the deletions either way.
 		IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
@@ -49,6 +52,8 @@ namespace gitlink::cmd
 		const FResult StageRes = InCtx.Repository->Stage(InFiles);
 		if (!StageRes)
 		{
+			UE_LOG(LogGitLink, Warning,
+				TEXT("Cmd_Delete: Stage failed: %s"), *StageRes.ErrorMessage);
 			return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
 		}
 

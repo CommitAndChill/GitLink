@@ -101,7 +101,7 @@ auto FGitLink_Subprocess::Run(const TArray<FString>& InArgs) -> FGitLink_Subproc
 	}
 	else if (ExitCode != 0)
 	{
-		UE_LOG(LogGitLink, Verbose,
+		UE_LOG(LogGitLink, Warning,
 			TEXT("Subprocess: '%s %s' exited with %d: %s"),
 			*_GitBinary, *ArgsStr, ExitCode, *Result.Get_CombinedError());
 	}

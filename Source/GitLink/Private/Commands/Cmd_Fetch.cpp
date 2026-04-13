@@ -1,4 +1,5 @@
 #include "GitLink_CommandDispatcher.h"
+#include "GitLinkLog.h"
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
 #include "GitLinkCore/Repository/GitLink_Repository_Params.h"
@@ -23,14 +24,20 @@ namespace gitlink::cmd
 				"GitLink: cannot fetch — repository not open."));
 		}
 
+		UE_LOG(LogGitLink, Log, TEXT("Cmd_Fetch: fetching from 'origin'"));
+
 		gitlink::FFetchParams Params;
 		Params.RemoteName = TEXT("origin");
 
 		const FResult FetchRes = InCtx.Repository->Fetch(Params, /*InProgress=*/ nullptr);
 		if (!FetchRes)
 		{
+			UE_LOG(LogGitLink, Warning,
+				TEXT("Cmd_Fetch: failed: %s"), *FetchRes.ErrorMessage);
 			return FCommandResult::Fail(FText::FromString(FetchRes.ErrorMessage));
 		}
+
+		UE_LOG(LogGitLink, Log, TEXT("Cmd_Fetch: fetch complete"));
 
 		FCommandResult Result = FCommandResult::Ok();
 		Result.InfoMessages.Add(LOCTEXT("FetchOk", "Fetched from 'origin'."));
