@@ -211,17 +211,25 @@ auto FGitLink_FileState::CanCheckout() const -> bool
 {
 	// "Checkout" in Unreal source control == acquire an LFS lock.
 	//
-	// Permissive policy: allow checkout unless we positively know the file is unlockable or
-	// already locked. Files that haven't been fully queried yet (Lock == Unknown or Unset) are
-	// given the benefit of the doubt — Cmd_CheckOut will filter to lockable extensions before
-	// actually calling git-lfs, so non-lockable files won't accidentally get locked.
-	//
-	// This solves the case where the editor queries a file that wasn't in the initial
-	// Cmd_Connect cache (e.g. created/modified after connect) — the default state has
-	// Lock == Unknown, and we don't want the checkout button greyed out for those.
-	return _State.Lock != EGitLink_LockState::Unlockable
-	    && _State.Lock != EGitLink_LockState::Locked
-	    && _State.Lock != EGitLink_LockState::LockedOther;
+	// Untracked and Ignored files aren't in git yet — you can't lock a file that git-lfs
+	// doesn't know about. The editor would otherwise prompt to check out new files that
+	// were just created, which is nonsensical.
+	const bool bUntracked =
+	   _State.Tree == EGitLink_TreeState::Untracked
+	|| _State.Tree == EGitLink_TreeState::Ignored
+	|| _State.Tree == EGitLink_TreeState::NotInRepo;
+
+	// Permissive policy for the lock state: allow checkout unless we positively know the
+	// file is unlockable or already locked. Files that haven't been fully queried yet
+	// (Lock == Unknown or Unset) are given the benefit of the doubt — Cmd_CheckOut will
+	// filter to lockable extensions before actually calling git-lfs, so non-lockable files
+	// won't accidentally get locked.
+	const bool bLockOk =
+	   _State.Lock != EGitLink_LockState::Unlockable
+	&& _State.Lock != EGitLink_LockState::Locked
+	&& _State.Lock != EGitLink_LockState::LockedOther;
+
+	return !bUntracked && bLockOk;
 }
 
 auto FGitLink_FileState::IsCheckedOut() const -> bool
