@@ -15,6 +15,7 @@
 namespace gitlink::op
 {
 	auto Get_BlobSizeAtCommit(gitlink::FRepository& InRepo, const FString& InCommitHash, const FString& InRepoRelativePath) -> int64;
+	auto Enumerate_TrackedFiles(gitlink::FRepository& InRepo) -> TArray<FString>;
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -350,6 +351,18 @@ namespace gitlink::cmd
 		{
 			// Explicit file list — every requested file gets an emitted state, even if it's
 			// clean, so the editor knows to clear stale modification markers.
+			//
+			// Build a set of tracked files (paths in the git index) so we can distinguish
+			// between (a) tracked + unmodified files and (b) brand new untracked files that
+			// git doesn't know about yet. Without this, new files would be stamped as
+			// Unmodified, which causes CanCheckout() to return true and the editor to prompt
+			// for a checkout on a file that isn't in git.
+			const TArray<FString> TrackedRelPaths = gitlink::op::Enumerate_TrackedFiles(*InCtx.Repository);
+			TSet<FString> TrackedSet;
+			TrackedSet.Reserve(TrackedRelPaths.Num());
+			for (const FString& RelPath : TrackedRelPaths)
+			{ TrackedSet.Add(RelPath); }
+
 			for (const FString& RequestedRaw : InFiles)
 			{
 				FString Normalized = RequestedRaw;
@@ -361,12 +374,16 @@ namespace gitlink::cmd
 				}
 				else
 				{
-					// Not in the dirty set -> unmodified + tracked. Technically this could be
-					// "untracked outside repo" too, but that determination needs a separate
-					// pathspec test; for v1 we optimistically call it Unmodified.
+					// Not in the dirty snapshot. Look it up in the git index to decide
+					// between Unmodified (tracked + clean) and Untracked (new file).
+					const FString RelPath = ToRepoRelativePath(InCtx.RepoRootAbsolute, Normalized);
+
 					FGitLink_CompositeState Clean;
 					Clean.File = EGitLink_FileState::Unknown;
-					Clean.Tree = EGitLink_TreeState::Unmodified;
+					Clean.Tree = TrackedSet.Contains(RelPath)
+						? EGitLink_TreeState::Unmodified
+						: EGitLink_TreeState::Untracked;
+
 					Result.UpdatedStates.Add(BuildState(Normalized, Clean));
 				}
 			}
