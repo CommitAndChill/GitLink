@@ -194,6 +194,21 @@ auto FGitLink_CommandDispatcher::Execute_AndComplete(
 			if (bHadStateUpdates)
 			{
 				_Owner.Broadcast_StateChanged();
+
+				// Working-tree-modifying commands (Revert, CheckIn, MarkForAdd, Delete,
+				// Resolve, MoveToChangelist, Sync, etc.) should refresh View Changes
+				// immediately. Read-only operations are excluded to avoid an infinite poll
+				// loop — UpdateStatus and UpdateChangelistsStatus emit UpdatedStates too.
+				const FName OpName = OpRef->GetName();
+				const bool bIsReadOnlyOp =
+				    OpName == TEXT("Connect")
+				 || OpName == TEXT("UpdateStatus")
+				 || OpName == TEXT("UpdateChangelistsStatus");
+
+				if (!bIsReadOnlyOp)
+				{
+					_Owner.Request_ImmediatePoll();
+				}
 			}
 		};
 
