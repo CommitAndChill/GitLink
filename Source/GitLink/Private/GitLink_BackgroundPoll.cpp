@@ -56,28 +56,56 @@ auto FGitLink_BackgroundPoll::Tick(float InDeltaTime) -> void
 	if (&Provider != &_Owner)
 	{ return; }
 
-	TSharedRef<ISourceControlOperation, ESPMode::ThreadSafe> StatusOp =
-		ISourceControlOperation::Create<FUpdateStatus>();
+	// Dispatch FUpdateStatus to refresh file state + remote LFS locks.
+	{
+		TSharedRef<ISourceControlOperation, ESPMode::ThreadSafe> StatusOp =
+			ISourceControlOperation::Create<FUpdateStatus>();
 
-	Provider.Execute(
-		StatusOp,
-		TArray<FString>(),
-		EConcurrency::Asynchronous,
-		FSourceControlOperationComplete::CreateLambda(
-			[](const FSourceControlOperationRef& /*Op*/, ECommandResult::Type InResult)
-			{
-				if (InResult != ECommandResult::Succeeded)
+		Provider.Execute(
+			StatusOp,
+			TArray<FString>(),
+			EConcurrency::Asynchronous,
+			FSourceControlOperationComplete::CreateLambda(
+				[](const FSourceControlOperationRef& /*Op*/, ECommandResult::Type InResult)
 				{
-					UE_LOG(LogGitLink, Verbose,
-						TEXT("BackgroundPoll: status refresh result=%d"),
-						static_cast<int32>(InResult));
-				}
-			}));
+					if (InResult != ECommandResult::Succeeded)
+					{
+						UE_LOG(LogGitLink, Verbose,
+							TEXT("BackgroundPoll: status refresh result=%d"),
+							static_cast<int32>(InResult));
+					}
+				}));
+	}
 
-	UE_LOG(LogGitLink, Verbose, TEXT("BackgroundPoll: dispatched status refresh"));
+	// Also dispatch FUpdateChangelistsStatus so the View Changes window refreshes.
+	// Without this, modifications show up in the content browser icons but the
+	// View Changes panel stays stale until the user manually hits Refresh.
+	{
+		TSharedRef<ISourceControlOperation, ESPMode::ThreadSafe> ChangelistsOp =
+			ISourceControlOperation::Create<FUpdatePendingChangelistsStatus>();
+
+		Provider.Execute(
+			ChangelistsOp,
+			TArray<FString>(),
+			EConcurrency::Asynchronous,
+			FSourceControlOperationComplete::CreateLambda(
+				[](const FSourceControlOperationRef& /*Op*/, ECommandResult::Type InResult)
+				{
+					if (InResult != ECommandResult::Succeeded)
+					{
+						UE_LOG(LogGitLink, Verbose,
+							TEXT("BackgroundPoll: changelists refresh result=%d"),
+							static_cast<int32>(InResult));
+					}
+				}));
+	}
+
+	UE_LOG(LogGitLink, Verbose, TEXT("BackgroundPoll: dispatched status + changelists refresh"));
 }
 
 auto FGitLink_BackgroundPoll::Request_ImmediatePoll() -> void
 {
+	UE_LOG(LogGitLink, Log, TEXT("BackgroundPoll: immediate poll requested (was %.1f/%.1f)"),
+		_TimeSinceLastPoll, _IntervalSeconds);
 	_TimeSinceLastPoll = _IntervalSeconds;
 }
