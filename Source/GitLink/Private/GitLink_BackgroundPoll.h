@@ -34,6 +34,10 @@ public:
 	// a status refresh when the interval is reached.
 	auto Tick(float InDeltaTime) -> void;
 
+	// Resets the accumulator so the next Tick() fires a poll almost immediately.
+	// Used after file save to get sub-2-second View Changes refresh.
+	auto Request_ImmediatePoll() -> void;
+
 	// Temporarily pauses the poll for the duration of the returned scope guard. Used by
 	// commands that modify the working tree (commit, revert) so the poll doesn't race.
 	struct FScopedPause

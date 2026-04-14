@@ -12,6 +12,7 @@ class FGitLink_StateCache;
 class FGitLink_CommandDispatcher;
 class FGitLink_Subprocess;
 class FGitLink_BackgroundPoll;
+class FGitLink_Menu;
 
 // --------------------------------------------------------------------------------------------------------------------
 // FGitLink_Provider — libgit2-backed ISourceControlProvider.
@@ -153,16 +154,25 @@ public:
 	// the cache.
 	auto Broadcast_StateChanged() -> void;
 
+	// Requests the background poll to fire on the next Tick. Used by the
+	// PackageSavedWithContext hook to get sub-2-second View Changes refresh.
+	auto Request_ImmediatePoll() -> void;
+
 private:
 	// Opens the libgit2 repository at ProjectDir (or the configured override) and caches the
 	// user / branch / remote metadata. Called from Init(true).
 	auto CheckRepositoryStatus() -> void;
+
+	// Called when the editor saves a package. Re-stages files in the Staged changelist
+	// and requests an immediate background poll so View Changes updates quickly.
+	auto OnPackageSaved(const FString& InFilename) -> void;
 
 	TUniquePtr<gitlink::FRepository>       _Repository;
 	TUniquePtr<FGitLink_StateCache>        _StateCache;
 	TUniquePtr<FGitLink_CommandDispatcher> _Dispatcher;  // constructed empty in Pass B
 	TUniquePtr<FGitLink_Subprocess>        _Subprocess;  // present once a repo is open
 	TUniquePtr<FGitLink_BackgroundPoll>    _BackgroundPoll;
+	TUniquePtr<FGitLink_Menu>              _Menu;
 
 	bool _bGitRepositoryFound          = false;
 	bool _bLfsAvailable                = false;
@@ -184,6 +194,7 @@ private:
 	FString _RemoteUrl;
 
 	FSourceControlStateChanged _OnSourceControlStateChanged;
+	FDelegateHandle _PackageSavedHandle;
 
 	mutable FCriticalSection _LastErrorsLock;
 	TArray<FText> _LastErrors;

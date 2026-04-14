@@ -76,3 +76,8 @@ auto FGitLink_BackgroundPoll::Tick(float InDeltaTime) -> void
 
 	UE_LOG(LogGitLink, Verbose, TEXT("BackgroundPoll: dispatched status refresh"));
 }
+
+auto FGitLink_BackgroundPoll::Request_ImmediatePoll() -> void
+{
+	_TimeSinceLastPoll = _IntervalSeconds;
+}
