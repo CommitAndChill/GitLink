@@ -256,7 +256,15 @@ auto FGitLink_Provider::OnPackageSaved(const FString& InFilename) -> void
 
 	// Ignore saves outside the repository root.
 	if (!Normalized.StartsWith(_PathToRepositoryRoot))
-	{ return; }
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("OnPackageSaved: ignoring '%s' (outside repo root '%s')"),
+			*Normalized, *_PathToRepositoryRoot);
+		return;
+	}
+
+	UE_LOG(LogGitLink, Log,
+		TEXT("OnPackageSaved: '%s' — requesting immediate poll"), *Normalized);
 
 	// If the file is in the Staged changelist, re-stage it so the index entry matches
 	// the new on-disk content. Without this, saving a staged file creates a confusing
