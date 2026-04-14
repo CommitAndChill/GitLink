@@ -5,12 +5,15 @@
 #include "GitLink_ChangelistState.h"
 #include "GitLink_StateCache.h"
 #include "GitLink_BackgroundPoll.h"
+#include "GitLink_Menu.h"
 #include "GitLink_HookProbe.h"
 #include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 #include "Slate/SGitLink_Settings.h"
 
 #include <Misc/App.h>
+#include <UObject/ObjectSaveContext.h>
+#include <UObject/Package.h>
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
 #include "GitLinkCore/Repository/GitLink_Repository_Params.h"
@@ -72,6 +75,18 @@ auto FGitLink_Provider::Close() -> void
 	UE_LOG(LogGitLink, Log, TEXT("FGitLink_Provider::Close"));
 
 	_BackgroundPoll.Reset();
+
+	if (_PackageSavedHandle.IsValid())
+	{
+		UPackage::PackageSavedWithContextEvent.Remove(_PackageSavedHandle);
+		_PackageSavedHandle.Reset();
+	}
+
+	if (_Menu.IsValid())
+	{
+		_Menu->Unregister();
+		_Menu.Reset();
+	}
 
 	_Repository.Reset();
 	_Subprocess.Reset();
@@ -201,6 +216,73 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 	{
 		_BackgroundPoll->SetInterval(0.f);
 	}
+
+	// Hook file saves for sub-2-second View Changes refresh. Unbind any previous handle
+	// (re-init case) before re-binding.
+	if (_PackageSavedHandle.IsValid())
+	{
+		UPackage::PackageSavedWithContextEvent.Remove(_PackageSavedHandle);
+	}
+#if ENGINE_MAJOR_VERSION >= 5
+	_PackageSavedHandle = UPackage::PackageSavedWithContextEvent.AddLambda(
+		[this](const FString& InFilename, UPackage* /*InPackage*/, FObjectPostSaveContext /*InContext*/)
+		{
+			OnPackageSaved(InFilename);
+		});
+#else
+	_PackageSavedHandle = UPackage::PackageSavedEvent.AddLambda(
+		[this](const FString& InFilename, UPackage* /*InPackage*/)
+		{
+			OnPackageSaved(InFilename);
+		});
+#endif
+
+	// Register toolbar buttons (Push, Pull, Revert All, Refresh) in the SCC dropdown.
+	if (!_Menu.IsValid())
+	{
+		_Menu = MakeUnique<FGitLink_Menu>();
+	}
+	_Menu->Register();
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+auto FGitLink_Provider::OnPackageSaved(const FString& InFilename) -> void
+{
+	if (!_bGitRepositoryFound)
+	{ return; }
+
+	FString Normalized = FPaths::ConvertRelativePathToFull(InFilename);
+	FPaths::NormalizeFilename(Normalized);
+
+	// Ignore saves outside the repository root.
+	if (!Normalized.StartsWith(_PathToRepositoryRoot))
+	{ return; }
+
+	// If the file is in the Staged changelist, re-stage it so the index entry matches
+	// the new on-disk content. Without this, saving a staged file creates a confusing
+	// diff where the index has the old version and the working tree has the new one.
+	if (_StateCache.IsValid() && _Repository.IsValid())
+	{
+		const FGitLink_FileStateRef State = _StateCache->Find_FileState(Normalized);
+		if (State->_State.Tree == EGitLink_TreeState::Staged)
+		{
+			FString RelPath = Normalized;
+			if (RelPath.StartsWith(_PathToRepositoryRoot, ESearchCase::IgnoreCase))
+			{
+				RelPath.RightChopInline(_PathToRepositoryRoot.Len(), EAllowShrinking::No);
+				RelPath.RemoveFromStart(TEXT("/"));
+			}
+			_Repository->Stage({ RelPath });
+		}
+	}
+
+	Request_ImmediatePoll();
+}
+
+auto FGitLink_Provider::Request_ImmediatePoll() -> void
+{
+	if (_BackgroundPoll.IsValid())
+	{ _BackgroundPoll->Request_ImmediatePoll(); }
 }
 
 // --------------------------------------------------------------------------------------------------------------------
