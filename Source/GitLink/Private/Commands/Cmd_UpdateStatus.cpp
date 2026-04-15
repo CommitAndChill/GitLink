@@ -380,7 +380,13 @@ namespace gitlink::cmd
 
 					FGitLink_CompositeState Clean;
 					Clean.File = EGitLink_FileState::Unknown;
-					Clean.Tree = TrackedSet.Contains(RelPath)
+
+					// Submodule files are never in the parent repo's index — they live in
+					// the submodule's own index. Treat them as Unmodified here; GetState()
+					// re-stamps them as Unlockable so actions are greyed out regardless.
+					const bool bInSubmodule = InCtx.Provider.Is_InSubmodule(Normalized);
+
+					Clean.Tree = (bInSubmodule || TrackedSet.Contains(RelPath))
 						? EGitLink_TreeState::Unmodified
 						: EGitLink_TreeState::Untracked;
 
