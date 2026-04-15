@@ -182,7 +182,7 @@ auto FGitLink_FileState::GetDisplayName() const -> FText
 		case EGitLink_Status::Untracked:   return LOCTEXT("Untracked",   "Untracked");
 		case EGitLink_Status::Ignored:     return LOCTEXT("Ignored",     "Ignored");
 		case EGitLink_Status::CheckedOut:  return LOCTEXT("CheckedOut",  "Checked Out");
-		case EGitLink_Status::LockedOther: return LOCTEXT("LockedOther", "Locked by Other");
+		case EGitLink_Status::LockedOther: return FText::Format(LOCTEXT("LockedOther", "Checked out by: {0}"), FText::FromString(_State.LockUser));
 		case EGitLink_Status::Lockable:    return LOCTEXT("Lockable",    "Lockable");
 		case EGitLink_Status::NotAtHead:   return LOCTEXT("NotAtHead",   "Not At Head");
 		case EGitLink_Status::NotLatest:   return LOCTEXT("NotLatest",   "Not Latest");
@@ -193,7 +193,13 @@ auto FGitLink_FileState::GetDisplayName() const -> FText
 
 auto FGitLink_FileState::GetDisplayTooltip() const -> FText
 {
-	return GetDisplayName();
+	switch (Get_OverallStatus())
+	{
+		case EGitLink_Status::LockedOther:
+			return FText::Format(LOCTEXT("LockedOther_Tooltip", "Checked out by: {0}"), FText::FromString(_State.LockUser));
+		default:
+			return GetDisplayName();
+	}
 }
 
 // --------------------------------------------------------------------------------------------------------------------
