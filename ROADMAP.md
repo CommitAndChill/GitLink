@@ -173,9 +173,9 @@ Revision Control Menu
 
 ---
 
-## Task 5 — Unit Tests (GitLinkTests module) 🚧 WALKING SKELETON LANDED
+## Task 5 — Unit Tests (GitLinkTests module) ✅ DONE
 
-**Status:** Module scaffold + `FTempRepo` helper + first suite (`GitLink.Repository.Status.Untracked`) built and linked green on 2026-04-17. Remaining five suites listed below are follow-up PRs — module wiring is proven, so they're cheap to add one at a time.
+**Status:** Completed 2026-04-17 on branch `dev/tests`. 11 suites across 5 files, all green in `Window → Developer Tools → Session Frontend → Automation` under `GitLink.Repository.*`. Scaffolding lives at `Source/GitLinkTests/` — new suites just drop a file into `Private/Tests/`.
 
 **Priority:** Medium. No tests currently = no regression safety net for future changes.
 
@@ -196,20 +196,19 @@ Revision Control Menu
      └─────────────────┘
 ```
 
-**Test coverage priorities:**
-1. ✅ **Status scan** — Create temp repo, add/modify/delete files, verify `Get_Status()` returns correct buckets. *(Walking-skeleton covers the untracked case; modified / deleted / staged cases are still TODO in `Test_Repository_Status.cpp`.)*
-2. **Staging** — `Stage()` + `Unstage()` round-trip.
-3. **Commit** — `Commit()` produces a valid HEAD (`FCommitParams` returns `FResult` only — read the new HEAD via `Get_Log()` rather than the commit call).
-4. **Log walk** — `Get_Log()` with path filter returns expected revisions.
-5. **Branches** — `Get_Branches()` + `Get_CurrentBranchName()`.
-6. **Submodules** — Open nested repo, verify `gitlink::op::Enumerate_SubmodulePaths` returns correct list.
+**Landed suites (all green):**
+1. ✅ **Status scan** — `Test_Repository_Status.cpp`: Untracked, StagedAdd, Modified, Deleted.
+2. ✅ **Staging** — `Test_Repository_Staging.cpp`: Stage/Unstage round-trip, StageAll with nested dirs.
+3. ✅ **Commit** — `Test_Repository_Commit.cpp`: commit + log-walk back, log path-filter across two commits.
+4. ✅ **Log walk** — folded into the Commit suite (the path-filter case exercises `FLogQuery.PathFilter`).
+5. ✅ **Branches** — `Test_Repository_Branches.cpp`: unborn HEAD pre-commit, HEAD branch visible after first commit. (Intentionally doesn't pin the branch name since libgit2's default depends on `init.defaultBranch`.)
+6. ✅ **Submodules** — `Test_Repository_Submodules.cpp`: empty-case + two-entry detection from a raw `.gitmodules` file (no inner working trees needed — `git_submodule_foreach` picks them up from the file).
 
-**Files created in walking skeleton:**
-- `Source/GitLinkTests/GitLinkTests.Build.cs`
-- `Source/GitLinkTests/GitLinkTests_Module.cpp`
-- `Source/GitLinkTests/GitLinkTestsLog.h`
+**Files landed:**
+- `Source/GitLinkTests/GitLinkTests.Build.cs` — depends on `GitLinkCore` + `libgit2` (the latter needed explicitly for link, not just headers).
+- `Source/GitLinkTests/GitLinkTests_Module.cpp` / `GitLinkTestsLog.h` — minimal `IMPLEMENT_MODULE` + log category.
 - `Source/GitLinkTests/Private/Helpers/GitLinkTests_TempRepo.h` / `.cpp` — libgit2-backed ephemeral repo under `Saved/GitLinkTests/<guid>/`, seeds `user.name` / `user.email` in the repo's local config so commits can fall through to `default_signature`.
-- `Source/GitLinkTests/Private/Tests/Test_Repository_Status.cpp` — `GitLink.Repository.Status.Untracked` suite.
+- `Source/GitLinkTests/Private/Tests/Test_Repository_Status.cpp` / `_Staging.cpp` / `_Commit.cpp` / `_Branches.cpp` / `_Submodules.cpp` — 11 suites total.
 
 **Uplugin:** `GitLinkTests` added as `Type: UncookedOnly, LoadingPhase: Default`. (`DeveloperTool` isn't a valid UE module Type — `UncookedOnly` matches the existing convention in `GitLink.uplugin` and is also editor-only.)
 
@@ -277,8 +276,8 @@ switch (Target.Platform)
 ## Suggested Sequencing
 
 ```
-Week 1:  Task 1 (lockable_exts investigation) ✅ DONE
-Week 2:  Task 5 (tests — unblocks safe changes for tasks 2/3)
+Week 1:  Task 1 (lockable_exts investigation)   ✅ DONE
+Week 2:  Task 5 (GitLinkTests module)           ✅ DONE
 Week 3:  Task 3 (conflict resolution — user-facing, medium scope)
 Week 4:  Task 2 (named changelists — new feature, medium scope)
 Later:   Tasks 4, 6, 7, 8 (lower priority / optional)
