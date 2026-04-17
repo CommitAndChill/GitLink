@@ -173,7 +173,9 @@ Revision Control Menu
 
 ---
 
-## Task 5 — Unit Tests (GitLinkTests module)
+## Task 5 — Unit Tests (GitLinkTests module) 🚧 WALKING SKELETON LANDED
+
+**Status:** Module scaffold + `FTempRepo` helper + first suite (`GitLink.Repository.Status.Untracked`) built and linked green on 2026-04-17. Remaining five suites listed below are follow-up PRs — module wiring is proven, so they're cheap to add one at a time.
 
 **Priority:** Medium. No tests currently = no regression safety net for future changes.
 
@@ -195,23 +197,24 @@ Revision Control Menu
 ```
 
 **Test coverage priorities:**
-1. **Status scan** — Create temp repo, add/modify/delete files, verify `Get_Status()` returns correct buckets.
+1. ✅ **Status scan** — Create temp repo, add/modify/delete files, verify `Get_Status()` returns correct buckets. *(Walking-skeleton covers the untracked case; modified / deleted / staged cases are still TODO in `Test_Repository_Status.cpp`.)*
 2. **Staging** — `Stage()` + `Unstage()` round-trip.
-3. **Commit** — `Commit()` produces expected head hash.
+3. **Commit** — `Commit()` produces a valid HEAD (`FCommitParams` returns `FResult` only — read the new HEAD via `Get_Log()` rather than the commit call).
 4. **Log walk** — `Get_Log()` with path filter returns expected revisions.
 5. **Branches** — `Get_Branches()` + `Get_CurrentBranchName()`.
-6. **Submodules** — Open nested repo, verify `Enumerate_SubmodulePaths` returns correct list.
+6. **Submodules** — Open nested repo, verify `gitlink::op::Enumerate_SubmodulePaths` returns correct list.
 
-**Files to create:**
+**Files created in walking skeleton:**
 - `Source/GitLinkTests/GitLinkTests.Build.cs`
 - `Source/GitLinkTests/GitLinkTests_Module.cpp`
-- `Source/GitLinkTests/Private/Tests/Test_Repository_Status.cpp` (one file per test suite)
-- `Source/GitLinkTests/Private/Helpers/TempRepo.h` (helper that creates/destroys a git repo in a temp dir)
+- `Source/GitLinkTests/GitLinkTestsLog.h`
+- `Source/GitLinkTests/Private/Helpers/GitLinkTests_TempRepo.h` / `.cpp` — libgit2-backed ephemeral repo under `Saved/GitLinkTests/<guid>/`, seeds `user.name` / `user.email` in the repo's local config so commits can fall through to `default_signature`.
+- `Source/GitLinkTests/Private/Tests/Test_Repository_Status.cpp` — `GitLink.Repository.Status.Untracked` suite.
 
-**Update:** `GitLink.uplugin` — add the new module as `Type: DeveloperTool, LoadingPhase: Default`.
+**Uplugin:** `GitLinkTests` added as `Type: UncookedOnly, LoadingPhase: Default`. (`DeveloperTool` isn't a valid UE module Type — `UncookedOnly` matches the existing convention in `GitLink.uplugin` and is also editor-only.)
 
 **Acceptance:**
-- `Window → Developer Tools → Session Frontend → Automation` shows `GitLink.*` tests.
+- `Window → Developer Tools → Session Frontend → Automation` shows `GitLink.*` tests. *(Verified by running the editor once and expanding the tree.)*
 - Tests run green in CI-style invocation: `UE -ExecCmds="Automation RunTests GitLink; Quit"`.
 
 ---
