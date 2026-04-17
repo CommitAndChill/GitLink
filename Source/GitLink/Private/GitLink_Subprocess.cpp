@@ -153,21 +153,38 @@ auto FGitLink_Subprocess::ProbeLockableExtensions(const TArray<FString>& InWildc
 	//   *.uasset: lockable: set
 	//   *.umap: lockable: set
 	//   *.txt: lockable: unspecified
-	// We want everything that ends in ': set' (and NOT ': unset' or ': unspecified').
+	// We want everything whose value is literally "set" (and NOT "unset" or "unspecified").
+	UE_LOG(LogGitLink, Verbose,
+		TEXT("ProbeLockableExtensions: raw stdout (%d bytes):\n%s"),
+		Result.StdOut.Len(), *Result.StdOut);
+
 	TArray<FString> Lines;
 	Result.StdOut.ParseIntoArrayLines(Lines, /*bCullEmpty=*/ true);
 
-	for (const FString& Line : Lines)
+	for (FString Line : Lines)
 	{
-		if (!Line.EndsWith(TEXT(": set")))
+		// Trim whitespace / stray CR that ParseIntoArrayLines can leave behind depending
+		// on git's line-ending behavior on Windows.
+		Line.TrimStartAndEndInline();
+
+		// Expected format: "<pattern>: <attr>: <value>". Split on ": " and inspect the
+		// trailing value; anything that's not "set" (e.g. "unset", "unspecified") is skipped.
+		TArray<FString> Parts;
+		Line.ParseIntoArray(Parts, TEXT(": "), /*CullEmpty=*/ false);
+		if (Parts.Num() < 3)
 		{ continue; }
 
-		// Extract the wildcard from "<pattern>: lockable: set"
-		int32 ColonIdx = INDEX_NONE;
-		if (!Line.FindChar(TEXT(':'), ColonIdx) || ColonIdx <= 0)
+		const FString Value = Parts.Last().TrimStartAndEnd();
+		if (!Value.Equals(TEXT("set"), ESearchCase::IgnoreCase))
 		{ continue; }
 
-		FString Pattern = Line.Left(ColonIdx).TrimStartAndEnd();
+		// Pattern is everything before the trailing ": <attr>: <value>" — rebuild from the
+		// leading parts to tolerate patterns that might themselves contain ": ".
+		TArray<FString> PatternParts;
+		PatternParts.Reserve(Parts.Num() - 2);
+		for (int32 Idx = 0; Idx < Parts.Num() - 2; ++Idx)
+		{ PatternParts.Add(Parts[Idx]); }
+		FString Pattern = FString::Join(PatternParts, TEXT(": ")).TrimStartAndEnd();
 
 		// Strip leading "*" so we have just the extension (".uasset").
 		if (Pattern.StartsWith(TEXT("*")))
@@ -179,6 +196,13 @@ auto FGitLink_Subprocess::ProbeLockableExtensions(const TArray<FString>& InWildc
 		{
 			Out.Add(MoveTemp(Pattern));
 		}
+	}
+
+	if (Out.IsEmpty())
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("ProbeLockableExtensions: no 'lockable: set' entries parsed from git check-attr output. ")
+			TEXT("Either .gitattributes has no lockable patterns, or git returned an unexpected format."));
 	}
 
 	return Out;

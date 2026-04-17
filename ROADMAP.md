@@ -11,52 +11,29 @@ Tasks remaining after v1.0. Each task below is self-contained and can be handed 
                  ┌─────────────────────┬──────────────────────┐
   main ──────────┤ 0: untracked fix    │ 1: auto-refresh      │
   (v1.0)         │    (merged)         │ 2: toolbar buttons   │
+                 │ T1: lockable probe  │ 3: lockable hardening│
+                 │    hardening (done) │                      │
                  └─────────────────────┴──────────────────────┘
 ```
 
 **Shipped (main):** libgit2-backed SCC provider, LFS locking, Working/Staged changelists, CheckOut/CheckIn/Revert/MarkForAdd/Delete/Sync/Fetch, history, submodule handling, remote lock polling, command logging, untracked-file checkout fix.
 
-**Pending merge (dev/auto-refresh-and-toolbar):** View Changes auto-refresh on save + working-tree-modifying ops, 4 toolbar buttons (Push/Pull/Revert All/Refresh).
+**Pending merge (dev/auto-refresh-and-toolbar):** View Changes auto-refresh on save + working-tree-modifying ops, 4 toolbar buttons (Push/Pull/Revert All/Refresh), `ProbeLockableExtensions` hardening + diagnostics (Task 1 — no bug found, parser made robust against trailing whitespace / CRLF, raw stdout logged at Verbose).
 
 ---
 
-## Task 1 — Investigate `lockable_exts=0`
+## Task 1 — Investigate `lockable_exts=0` ✅ DONE
 
-**Priority:** Medium. Works today via hardcoded fallback, but silently ignoring `.gitattributes` is a correctness bug.
+**Outcome:** No confirmed bug — the original parser worked correctly against git's actual output format (`*.uasset: lockable: set`) on Windows. Verified on 2026-04-17: after adding a `.gitattributes` with lockable entries to a project root, connect log reported `lockable_exts=2`. Previous `lockable_exts=0` sightings were real — the project simply had no `.gitattributes` with lockable patterns at the repo root, so the hardcoded fallback was doing its job.
 
-**Problem:** `ProbeLockableExtensions` in `GitLink_Subprocess.cpp` parses `git check-attr lockable *.uasset *.umap ...` output. At connect time the log shows `lockable_exts=0 (0=using hardcoded defaults)` even for repos with proper `.gitattributes` lockable entries.
+**Changes made (defensive hardening):**
+- `ProbeLockableExtensions` now trims each line before parsing (tolerates stray CR / trailing whitespace — hypothesis 2 from the original investigation).
+- Splits on `": "` and inspects the trailing value rather than `EndsWith(": set")`, so a `set ` with trailing whitespace wouldn't be silently dropped.
+- Added Verbose logging of the raw `git check-attr` stdout, plus a Verbose diagnostic when the probe returns empty. Future `lockable_exts=0` reports can be root-caused from logs.
 
-**Investigation path:**
+**Files:** `Source/GitLink/Private/GitLink_Subprocess.cpp` (ProbeLockableExtensions, lines ~130-210).
 
-```
-CheckRepositoryStatus()
-        │
-        ▼
-Subprocess.ProbeLockableExtensions({ "*.uasset", "*.umap", "*.uexp", "*.ubulk" })
-        │
-        ▼
-`git check-attr lockable *.uasset *.umap *.uexp *.ubulk`
-        │
-        ▼
-Parses lines ending with ": set"
-        │
-        ▼
-Returns empty → hardcoded fallback kicks in
-```
-
-**Hypotheses to test (in order):**
-1. `git check-attr` output format differs from parser's expectation (e.g., `*.uasset: lockable: set` vs `*.uasset lockable set`).
-2. The parser's `EndsWith(": set")` check is too strict (trailing whitespace? CRLF?).
-3. `git check-attr` requires files to exist on disk matching the pattern.
-4. The subprocess isn't running with the correct working directory.
-
-**Files:** `Source/GitLink/Private/GitLink_Subprocess.cpp` (lines ~130-185).
-
-**Acceptance:**
-- Run `git check-attr lockable Content/Weapon/Sword.uasset` manually to see raw output.
-- Add Verbose logging of the raw stdout in `ProbeLockableExtensions` to capture what the subprocess returns.
-- Fix the parser to handle the actual output.
-- Connect log shows `lockable_exts=N (N>0)` on a repo with configured lockable attributes.
+**Follow-up (not blocking, host-project-specific):** If the host project has no root `.gitattributes`, the plugin falls back to hardcoded extensions. Committing a real `.gitattributes` (with an `[attr]lock` macro + `*.uasset lock` / `*.umap lock`, or via `git lfs track --lockable "*.uasset"`) makes the probe authoritative and enables the read-only-on-checkout behavior that drives UE's "must take lock before editing" flow.
 
 ---
 
@@ -297,7 +274,7 @@ switch (Target.Platform)
 ## Suggested Sequencing
 
 ```
-Week 1:  Task 1 (lockable_exts investigation — small, unblocks correctness)
+Week 1:  Task 1 (lockable_exts investigation) ✅ DONE
 Week 2:  Task 5 (tests — unblocks safe changes for tasks 2/3)
 Week 3:  Task 3 (conflict resolution — user-facing, medium scope)
 Week 4:  Task 2 (named changelists — new feature, medium scope)
