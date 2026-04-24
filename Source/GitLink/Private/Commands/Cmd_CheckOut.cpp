@@ -51,13 +51,23 @@ namespace gitlink::cmd
 		if (InFiles.IsEmpty())
 		{ return FCommandResult::Ok(); }
 
-		// Filter to lockable files only. Non-lockable files would either fail at the LFS
-		// server or silently succeed as a no-op — neither is useful to the editor.
+		// Filter to lockable files, skipping submodules. Submodule files should never reach
+		// this command: FGitLink_FileState reports IsCheckedOut()=true / CanCheckout()=false
+		// for them, so UE's PromptToCheckoutPackages short-circuits before invoking CheckOut.
+		// This filter is defense-in-depth in case some other code path calls Execute(CheckOut)
+		// with a submodule file explicitly — we silently no-op rather than hitting the parent
+		// repo's LFS server (which has no knowledge of child-repo files).
 		TArray<FString> LockableAbsolute;
 		LockableAbsolute.Reserve(InFiles.Num());
+
 		for (const FString& File : InFiles)
 		{
-			if (InCtx.Provider.Is_FileLockable(File))
+			if (InCtx.Provider.Is_InSubmodule(File))
+			{
+				UE_LOG(LogGitLink, Verbose,
+					TEXT("Cmd_CheckOut: skipping submodule file '%s'"), *File);
+			}
+			else if (InCtx.Provider.Is_FileLockable(File))
 			{
 				LockableAbsolute.Add(File);
 			}
@@ -69,11 +79,10 @@ namespace gitlink::cmd
 		}
 
 		if (LockableAbsolute.IsEmpty())
-		{
-			// Nothing to lock — not an error, just a no-op. This can happen if the editor
-			// selects a mix of lockable and non-lockable files.
-			return FCommandResult::Ok();
-		}
+		{ return FCommandResult::Ok(); }
+
+		FCommandResult Result = FCommandResult::Ok();
+		Result.UpdatedStates.Reserve(LockableAbsolute.Num());
 
 		// Build the argument list: "lock <relative paths...>"
 		TArray<FString> LockArgs;
@@ -127,8 +136,6 @@ namespace gitlink::cmd
 
 		// Emit predictive Locked states for every file we just locked. The editor will
 		// re-query status and see IsCheckedOut() == true.
-		FCommandResult Result = FCommandResult::Ok();
-		Result.UpdatedStates.Reserve(LockableAbsolute.Num());
 		for (const FString& Absolute : LockableAbsolute)
 		{
 			// Pull the existing state so we don't clobber File/Tree if the file is dirty.

@@ -100,7 +100,7 @@ At connect time, `git_submodule_foreach` enumerates submodule paths stored on th
 
 4. **Cmd_Connect re-init** — The editor fires `Init(force=true)` multiple times during startup. `Cmd_Connect` rebuilds the entire state cache each time. LFS lock discovery (Stage 3) must run during connect to avoid losing lock state.
 
-5. **Submodule file state timing** — `GetState()` always stamps submodule files as Unlockable (no Lock==Unknown guard) because GetState may be called before `CheckRepositoryStatus()` populates `_SubmodulePaths`.
+5. **Submodule file state timing (fixed)** — Root cause was in `Cmd_UpdateStatus`'s `BuildState` lambda: when a submodule file had no existing cache entry (`Lock==Unknown`), `Is_FileLockable()` returned `true` for `.uasset`, stamping `Lock=NotLocked`. Combined with `Tree=Unmodified` (submodule files get this in the explicit-file-list path), `CanCheckout()` returned `true` → checkout dialog. Fixed by adding `Is_InSubmodule()` check in `BuildState`'s else-branch so submodule files always get `Lock=Unlockable`. Defence-in-depth: `GetOrCreate_FileState` also stamps Unlockable at creation via `Set_SubmodulePaths()`; `Cmd_CheckOut` short-circuits for submodule paths (clears read-only, emits Unlockable, returns success) as a last-resort safety net.
 
 6. **git commit commits the entire index** — libgit2's `git_commit_create` always commits from the current index tree. When multiple changelists have files staged, submitting one changelist must temporarily unstage the others (see CheckIn cross-CL isolation above).
 

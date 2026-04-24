@@ -29,6 +29,18 @@ auto FGitLink_StateCache::GetOrCreate_FileState(const FString& InFilename) -> FG
 		{ return *Existing; }
 	}
 
+	// Check submodule membership before taking the write lock so the lock ordering is
+	// always _SubmodulePathsLock → _FileStatesLock (never the reverse).
+	bool bIsSubmodule = false;
+	{
+		FReadScopeLock SubRead(_SubmodulePathsLock);
+		for (const FString& SubPath : _SubmodulePaths)
+		{
+			if (Key.StartsWith(SubPath, ESearchCase::IgnoreCase))
+			{ bIsSubmodule = true; break; }
+		}
+	}
+
 	// Slow path: upgrade to write, insert, return.
 	FWriteScopeLock Write(_FileStatesLock);
 
@@ -37,8 +49,25 @@ auto FGitLink_StateCache::GetOrCreate_FileState(const FString& InFilename) -> FG
 	{ return *Existing; }
 
 	FGitLink_FileStateRef New = MakeShared<FGitLink_FileState, ESPMode::ThreadSafe>(Key);
+
+	// Stamp submodule entries so the FGitLink_FileState predicates route them past the
+	// checkout dialog (IsCheckedOut=true, CanCheckout=false) from the very first query,
+	// even before GetState() has had a chance to annotate. Closes CLAUDE.md Pitfall #5.
+	if (bIsSubmodule)
+	{
+		New->_State.bInSubmodule = true;
+		New->_State.Lock = EGitLink_LockState::Unlockable;
+		New->_State.Tree = EGitLink_TreeState::Unmodified;
+	}
+
 	_FileStates.Add(Key, New);
 	return New;
+}
+
+auto FGitLink_StateCache::Set_SubmodulePaths(TArray<FString> InSubmodulePaths) -> void
+{
+	FWriteScopeLock Write(_SubmodulePathsLock);
+	_SubmodulePaths = MoveTemp(InSubmodulePaths);
 }
 
 auto FGitLink_StateCache::Find_FileState(const FString& InFilename) const -> FGitLink_FileStateRef
@@ -172,7 +201,8 @@ auto FGitLink_StateCache::ShouldIgnoreForceRefresh(const FString& InFilename) co
 // --------------------------------------------------------------------------------------------------------------------
 auto FGitLink_StateCache::Clear() -> void
 {
-	{ FWriteScopeLock W(_FileStatesLock);        _FileStates.Empty();       }
-	{ FWriteScopeLock W(_ChangelistStatesLock);  _ChangelistStates.Empty(); }
+	{ FWriteScopeLock W(_FileStatesLock);        _FileStates.Empty();         }
+	{ FWriteScopeLock W(_ChangelistStatesLock);  _ChangelistStates.Empty();   }
 	{ FScopeLock      L(&_IgnoreForceLock);      _IgnoreForceRefresh.Empty(); }
+	{ FWriteScopeLock W(_SubmodulePathsLock);    _SubmodulePaths.Empty();     }
 }

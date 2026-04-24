@@ -54,12 +54,23 @@ public:
 	auto Remove_IgnoreForceRefresh(const FString& InFilename) -> bool;  // true if removed
 	auto ShouldIgnoreForceRefresh (const FString& InFilename) const -> bool;
 
+	// Called by the provider after connect to install a snapshot of submodule paths.
+	// New cache entries whose key starts with a submodule prefix are stamped Unlockable
+	// at creation time, closing the timing window described in CLAUDE.md Pitfall #5.
+	auto Set_SubmodulePaths(TArray<FString> InSubmodulePaths) -> void;
+
 	// --- Bulk ops ---
 	auto Clear() -> void;
 
 private:
 	mutable FRWLock _FileStatesLock;
 	TMap<FString, FGitLink_FileStateRef> _FileStates;
+
+	// Snapshot of submodule absolute paths (trailing-slash-terminated). Written once per
+	// connect under _SubmodulePathsLock; read from GetOrCreate_FileState. Lock ordering:
+	// always acquire _SubmodulePathsLock before _FileStatesLock.
+	mutable FRWLock  _SubmodulePathsLock;
+	TArray<FString>  _SubmodulePaths;
 
 	mutable FRWLock _ChangelistStatesLock;
 	TMap<FGitLink_Changelist, FGitLink_ChangelistStateRef> _ChangelistStates;
