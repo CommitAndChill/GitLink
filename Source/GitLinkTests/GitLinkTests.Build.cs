@@ -18,5 +18,13 @@ public class GitLinkTests : ModuleRules
 			"GitLinkCore",
 			"libgit2",
 		});
+
+		// Tests that exercise the editor-side FGitLink_FileState predicates need the GitLink
+		// module plus its ISourceControlState parent from the SourceControl module.
+		PrivateDependencyModuleNames.AddRange(new string[]
+		{
+			"GitLink",
+			"SourceControl",
+		});
 	}
 }

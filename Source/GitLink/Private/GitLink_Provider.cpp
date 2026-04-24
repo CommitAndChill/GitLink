@@ -185,6 +185,16 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 			{ AbsPath += TEXT("/"); }
 			_SubmodulePaths.Add(MoveTemp(AbsPath));
 		}
+
+		// Push a snapshot into the state cache so new entries are stamped Unlockable at
+		// creation time. This closes the timing window (CLAUDE.md Pitfall #5) where
+		// GetOrCreate_FileState is called before GetState() has had a chance to annotate.
+		_StateCache->Set_SubmodulePaths(_SubmodulePaths);
+
+		for (const FString& SubPath : _SubmodulePaths)
+		{
+			UE_LOG(LogGitLink, Verbose, TEXT("CheckRepositoryStatus: submodule path: '%s'"), *SubPath);
+		}
 	}
 
 	UE_LOG(LogGitLink, Log,
@@ -355,6 +365,13 @@ auto FGitLink_Provider::GetState(
 		// during early init, so a previous query might have left Lock=Unknown.
 		if (Is_InSubmodule(Normalized))
 		{
+			// Mark as in-submodule. The FGitLink_FileState predicates special-case this flag:
+			//   - IsCheckedOut() returns true → UE's PromptToCheckoutPackages short-circuits
+			//     via `bAlreadyCheckedOut = IsCheckedOut() || IsAdded()`, no dialog.
+			//   - IsSourceControlled() returns true → History right-click stays enabled.
+			//   - CanCheckout/CanCheckIn/CanRevert/CanAdd/CanDelete all return false → no
+			//     bogus menu items that would try to operate on the parent repo.
+			State->_State.bInSubmodule = true;
 			State->_State.Lock = EGitLink_LockState::Unlockable;
 			if (State->_State.Tree == EGitLink_TreeState::NotInRepo ||
 				State->_State.Tree == EGitLink_TreeState::Unset)

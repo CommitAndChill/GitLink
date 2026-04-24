@@ -91,6 +91,13 @@ struct FGitLink_CompositeState
 
 	FString LockUser;    ///< Owner of an LFS lock, if any (display name from the LFS server).
 	FString HeadBranch;  ///< Branch that holds a newer version, if Remote != UpToDate.
+
+	/// True when this file lives inside a git submodule relative to the parent repo we're
+	/// providing SCC for. The submodule's own GitLink instance (if any) owns real tracking;
+	/// from the parent's perspective the file is "already checked out" so UE's save pipeline
+	/// proceeds without showing the checkout dialog. History still works because we report
+	/// IsSourceControlled()=true — we just disable all mutation actions (CanCheckIn/Revert/Add).
+	bool bInSubmodule = false;
 };
 
 // --------------------------------------------------------------------------------------------------------------------

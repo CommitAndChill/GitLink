@@ -207,6 +207,10 @@ auto FGitLink_FileState::GetDisplayTooltip() const -> FText
 // --------------------------------------------------------------------------------------------------------------------
 auto FGitLink_FileState::CanCheckIn() const -> bool
 {
+	// Submodule files belong to a child repo — check-in from the parent is nonsensical.
+	if (_State.bInSubmodule)
+	{ return false; }
+
 	return _State.File == EGitLink_FileState::Added
 	    || _State.File == EGitLink_FileState::Deleted
 	    || _State.File == EGitLink_FileState::Modified
@@ -215,6 +219,12 @@ auto FGitLink_FileState::CanCheckIn() const -> bool
 
 auto FGitLink_FileState::CanCheckout() const -> bool
 {
+	// Submodule files can't be checked out from the parent repo — the LFS server for the
+	// parent doesn't know about them. The checkout dialog is suppressed via IsCheckedOut()
+	// below, but also gate this predicate so the right-click menu greys the action out.
+	if (_State.bInSubmodule)
+	{ return false; }
+
 	// "Checkout" in Unreal source control == acquire an LFS lock.
 	//
 	// Untracked and Ignored files aren't in git yet — you can't lock a file that git-lfs
@@ -240,6 +250,13 @@ auto FGitLink_FileState::CanCheckout() const -> bool
 
 auto FGitLink_FileState::IsCheckedOut() const -> bool
 {
+	// Submodule files report as "already checked out" so UE5's PromptToCheckoutPackages
+	// short-circuits via its `bAlreadyCheckedOut = IsCheckedOut() || IsAdded()` branch.
+	// This is what actually suppresses the dialog. The file never gets LFS-locked against
+	// the parent repo — the submodule's own SCC instance handles real tracking.
+	if (_State.bInSubmodule)
+	{ return true; }
+
 	return _State.Lock == EGitLink_LockState::Locked;
 }
 
@@ -280,6 +297,12 @@ auto FGitLink_FileState::IsCurrent() const -> bool
 
 auto FGitLink_FileState::IsSourceControlled() const -> bool
 {
+	// Submodule files are under source control (in the submodule's repo). Return true here
+	// so the right-click "History" menu item stays enabled — history queries open the
+	// submodule's repo temporarily via Get_SubmoduleRoot (see Cmd_UpdateStatus::BuildHistory).
+	if (_State.bInSubmodule)
+	{ return true; }
+
 	return _State.Tree != EGitLink_TreeState::Untracked
 	    && _State.Tree != EGitLink_TreeState::Ignored
 	    && _State.Tree != EGitLink_TreeState::NotInRepo
@@ -324,11 +347,17 @@ auto FGitLink_FileState::IsModified() const -> bool
 
 auto FGitLink_FileState::CanAdd() const -> bool
 {
+	if (_State.bInSubmodule)
+	{ return false; }
+
 	return _State.Tree == EGitLink_TreeState::Untracked;
 }
 
 auto FGitLink_FileState::CanDelete() const -> bool
 {
+	if (_State.bInSubmodule)
+	{ return false; }
+
 	return IsSourceControlled() && _State.File != EGitLink_FileState::Deleted;
 }
 
@@ -339,6 +368,9 @@ auto FGitLink_FileState::IsConflicted() const -> bool
 
 auto FGitLink_FileState::CanRevert() const -> bool
 {
+	if (_State.bInSubmodule)
+	{ return false; }
+
 	// A file can be reverted if it has local modifications (the usual case) OR if it's
 	// locked by us but not yet modified — reverting a locked-but-clean file releases the
 	// LFS lock, which is the only way to "un-checkout" in a locking-based workflow.

@@ -201,6 +201,14 @@ namespace gitlink::cmd
 			State->_State     = InComposite;
 			State->_TimeStamp = Now;
 
+			// Always stamp bInSubmodule from the provider's authoritative path list. Callers
+			// that populate CompositeByPath from git-status bucket data don't know about
+			// submodules, and the flag must be correct for the state predicates to work.
+			if (InCtx.Provider.Is_InSubmodule(InFilename))
+			{
+				State->_State.bInSubmodule = true;
+			}
+
 			// Carry forward the existing lock state from the cache so that a prior Locked
 			// (from Cmd_CheckOut) isn't clobbered to NotLocked. Lock state is owned by
 			// Cmd_CheckOut / Cmd_Revert / Cmd_Connect — UpdateStatus only needs to ensure
@@ -213,7 +221,10 @@ namespace gitlink::cmd
 			}
 			else
 			{
-				const bool bLockable = InCtx.Provider.Is_FileLockable(InFilename);
+				// Submodule files can never be locked from the parent repo regardless of
+				// extension — treat them as Unlockable so CanCheckout() returns false.
+				const bool bSubmodule = InCtx.Provider.Is_InSubmodule(InFilename);
+				const bool bLockable  = !bSubmodule && InCtx.Provider.Is_FileLockable(InFilename);
 				State->_State.Lock = bLockable
 					? EGitLink_LockState::NotLocked
 					: EGitLink_LockState::Unlockable;
@@ -328,8 +339,9 @@ namespace gitlink::cmd
 					if (RemoteLockAbsolutes.Contains(Cached->GetFilename()))
 					{ continue; }
 
-					// Lock was released — update to NotLocked (or Unlockable if not lockable).
-					const bool bLockable = InCtx.Provider.Is_FileLockable(Cached->GetFilename());
+					// Lock was released — update to NotLocked (or Unlockable if not lockable/submodule).
+					const bool bSubmodule = InCtx.Provider.Is_InSubmodule(Cached->GetFilename());
+					const bool bLockable  = !bSubmodule && InCtx.Provider.Is_FileLockable(Cached->GetFilename());
 
 					FGitLink_CompositeState Composite = Cached->_State;
 					Composite.Lock     = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
@@ -381,10 +393,12 @@ namespace gitlink::cmd
 					FGitLink_CompositeState Clean;
 					Clean.File = EGitLink_FileState::Unknown;
 
-					// Submodule files are never in the parent repo's index — they live in
-					// the submodule's own index. Treat them as Unmodified here; GetState()
-					// re-stamps them as Unlockable so actions are greyed out regardless.
+					// Submodule files: mark with bInSubmodule so FGitLink_FileState predicates route
+					// them away from the checkout dialog (via IsCheckedOut()=true) while keeping
+					// IsSourceControlled()=true so History stays enabled. BuildState below will
+					// also stamp Lock=Unlockable and carry the bInSubmodule flag forward.
 					const bool bInSubmodule = InCtx.Provider.Is_InSubmodule(Normalized);
+					Clean.bInSubmodule = bInSubmodule;
 
 					Clean.Tree = (bInSubmodule || TrackedSet.Contains(RelPath))
 						? EGitLink_TreeState::Unmodified
