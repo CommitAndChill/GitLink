@@ -316,9 +316,13 @@ auto FGitLink_Subprocess::RunToFile(const TArray<FString>& InArgs, const FString
 	void* WritePipe = nullptr;
 	FPlatformProcess::CreatePipe(ReadPipe, WritePipe);
 
-	// CreateProc signature: (..., PipeWriteChild, PipeReadChild)
-	// PipeWriteChild = child's stdin (we don't need it → nullptr)
-	// PipeReadChild  = child's stdout (WritePipe end — child writes, we read from ReadPipe)
+	// UE's CreateProc parameters are named from the CHILD process's perspective:
+	//   PipeWriteChild = the handle the CHILD writes to → we pass WritePipe here to capture
+	//                    the child's stdout (we then read from the matching ReadPipe).
+	//   PipeReadChild  = the handle the CHILD reads from (its stdin) → nullptr, we don't send
+	//                    anything to git's stdin for cat-file.
+	// Prior versions had these swapped, causing 0-byte extractions because git's stdout was
+	// dropped on the floor while its stdin was hooked to our unused WritePipe.
 	FProcHandle Proc = FPlatformProcess::CreateProc(
 		*_GitBinary,
 		*ArgsStr,
@@ -328,8 +332,8 @@ auto FGitLink_Subprocess::RunToFile(const TArray<FString>& InArgs, const FString
 		/*OutProcessID=*/ nullptr,
 		/*InPriority=*/ 0,
 		WorkDir.IsEmpty() ? nullptr : *WorkDir,
-		/*PipeWriteChild=*/ nullptr,
-		/*PipeReadChild=*/  WritePipe);
+		/*PipeWriteChild=*/ WritePipe,
+		/*PipeReadChild=*/  nullptr);
 
 	if (!Proc.IsValid())
 	{
@@ -370,6 +374,18 @@ auto FGitLink_Subprocess::RunToFile(const TArray<FString>& InArgs, const FString
 	{
 		UE_LOG(LogGitLink, Warning,
 			TEXT("RunToFile: git exited with code %d"), ReturnCode);
+		return false;
+	}
+
+	// Treat zero-byte output as failure. Real .uasset extractions are always non-empty, and a
+	// zero-byte "success" has historically masked pipe-wiring bugs (see the PipeWriteChild /
+	// PipeReadChild comment above). Callers that legitimately want to capture empty output can
+	// check the file size themselves.
+	if (FileContent.Num() == 0)
+	{
+		UE_LOG(LogGitLink, Warning,
+			TEXT("RunToFile: git exited 0 but produced no output — check args and that stdout "
+				 "was actually captured"));
 		return false;
 	}
 

@@ -61,11 +61,18 @@ auto FGitLink_Revision::Get(FString& InOutFilename) const -> bool
 	const FString TempFilename = FPaths::ConvertRelativePathToFull(
 		FPaths::Combine(TempDir, FString::Printf(TEXT("temp-%s-%s"), *_ShortCommitId, *CleanFilename)));
 
-	// Reuse if already extracted.
+	// Reuse if already extracted — but only if the cached file is non-empty. Zero-byte leftovers
+	// from an earlier broken extraction would otherwise silently defeat the retry: UE would load
+	// the empty file, fail to parse it, and show "Unable to load assets to diff" forever.
 	if (FPaths::FileExists(TempFilename))
 	{
-		InOutFilename = TempFilename;
-		return true;
+		const int64 ExistingSize = IFileManager::Get().FileSize(*TempFilename);
+		if (ExistingSize > 0)
+		{
+			InOutFilename = TempFilename;
+			return true;
+		}
+		IFileManager::Get().Delete(*TempFilename);
 	}
 
 	// Ensure temp directory exists.
