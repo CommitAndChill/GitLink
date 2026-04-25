@@ -11,6 +11,11 @@ public class GitLinkTests : ModuleRules
 		// from .cpp files inside Private/.
 		PrivateIncludePaths.Add(ModuleDirectory);
 
+		// Subprocess-level tests (Test_Subprocess_RunToFile.cpp) need to #include the internal
+		// FGitLink_Subprocess header. It's kept Private by design (internal impl detail), so
+		// expose it to the test module via an include-path rather than promoting it to Public/.
+		PrivateIncludePaths.Add(System.IO.Path.Combine(ModuleDirectory, "..", "GitLink", "Private"));
+
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
 			"Core",

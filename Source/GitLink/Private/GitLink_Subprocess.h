@@ -27,7 +27,7 @@ struct FGitLink_SubprocessResult
 
 // --------------------------------------------------------------------------------------------------------------------
 
-class FGitLink_Subprocess
+class GITLINK_API FGitLink_Subprocess
 {
 public:
 	FGitLink_Subprocess() = default;
