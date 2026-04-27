@@ -60,7 +60,26 @@ State predicates (`CanCheckout`, `CanRevert`, `IsCheckedOut`, etc.) are on `FGit
 
 ### Submodule Support
 
-At connect time, `git_submodule_foreach` enumerates submodule paths stored on the provider. `GetState()` stamps submodule files as `Unlockable` so all actions are greyed out. History queries open a temporary `FRepository` for the submodule's repo.
+At connect time, `git_submodule_foreach` enumerates submodule paths stored on the provider. State predicates are **submodule-agnostic** — submodule files are checkable-out, checkable-in, deletable, addable, etc. on the same basis as outer-repo files. Submodule special-casing happens at the command layer: `InFiles` is partitioned by submodule root via `PartitionByRepo` (in [Cmd_Shared.h](Source/GitLink/Private/Commands/Cmd_Shared.h)) and each bucket is processed against its own repo.
+
+Two routing primitives:
+
+1. **In-process libgit2** — `Provider::Open_SubmoduleRepositoryFor(InAbsolutePath)` returns a freshly-opened `gitlink::FRepository` for the containing submodule. Used by `Cmd_Delete`, `Cmd_Revert`, `Cmd_MarkForAdd`, `Cmd_CheckIn` for index/working-tree mutations. History and Diff use the same pattern.
+2. **Subprocess git / git-lfs** — `FGitLink_Subprocess::Run(args, cwdOverride)` and `RunLfs(args, cwdOverride)` run with a per-call cwd. Empty override → parent's working directory. Submodule cwd → submodule's git config / remote / LFS endpoint are picked up implicitly. Used by `Cmd_CheckOut` (lock), `Cmd_CheckIn` (subprocess commit path), `Release_LfsLocksBestEffort` (unlock), and the Stage-3 lock discovery in `Cmd_Connect` / `Cmd_UpdateStatus`.
+
+**State predicate contract for submodule files** ([GitLink_State.cpp](Source/GitLink/Private/GitLink_State.cpp)) — `bInSubmodule` is the only flag the predicates carry; all others mirror outer-repo behavior:
+
+| Predicate | Submodule | Notes |
+|---|---|---|
+| `IsSourceControlled()` | `true` (forced) | Submodule files always show as tracked even if the parent's status walk doesn't see inside the submodule. Keeps History/Diff enabled. |
+| `IsCurrent()` | `true` (optimistic) | We don't poll the submodule's remote tracking branch. Without this, UE's pre-delete check fires the misleading "not at latest" error. |
+| `IsCheckedOut()` / `CanCheckout()` / `CanCheckIn()` / `CanDelete()` / `CanRevert()` / `CanAdd()` | same logic as outer-repo files | Driven purely by lock + tree state. Submodule routing happens in commands. |
+
+**Lock state polling** — `Cmd_UpdateStatus` (full-scan path) and `Cmd_Connect` (Stage 3) iterate `Provider::Get_SubmodulePaths()` and call `QueryLfsLocks_Local`/`QueryLfsLocks_Remote` once per repo with the appropriate cwd. Results are merged into a single absolute-path-keyed map before applying so the existing emit-vs-cache update logic stays repo-agnostic. This is the only way to discover `LockedOther` for files inside a submodule — each submodule's LFS endpoint is separate.
+
+**Submodule commit hooks** — `Cmd_CheckIn`'s subprocess-fallback-for-hooks path is **not** used for submodule commits. We commit submodules in-process via libgit2 unconditionally (no hook execution). The `bHasPreCommitOrCommitMsgHook` probe in `Cmd_Connect` only runs against the parent. If users have hooks in submodules they care about, they'd need to commit the submodule manually. Acceptable v2 limitation.
+
+**Lockable extensions** — assumed to be the same across parent and all submodules. The parent's `_LockableExtensions` (probed via `git check-attr lockable` once at connect) is consulted for submodule files too. Most projects use a uniform `.gitattributes` lockable pattern set; if a submodule diverges, false-positive lockability would result in `git lfs lock` calls that the submodule's server rejects (handled gracefully — failure becomes a warning, not a hard error).
 
 ### Diff / Revision Get
 
@@ -100,7 +119,7 @@ At connect time, `git_submodule_foreach` enumerates submodule paths stored on th
 
 4. **Cmd_Connect re-init** — The editor fires `Init(force=true)` multiple times during startup. `Cmd_Connect` rebuilds the entire state cache each time. LFS lock discovery (Stage 3) must run during connect to avoid losing lock state.
 
-5. **Submodule file state timing (fixed)** — Root cause was in `Cmd_UpdateStatus`'s `BuildState` lambda: when a submodule file had no existing cache entry (`Lock==Unknown`), `Is_FileLockable()` returned `true` for `.uasset`, stamping `Lock=NotLocked`. Combined with `Tree=Unmodified` (submodule files get this in the explicit-file-list path), `CanCheckout()` returned `true` → checkout dialog. Fixed by adding `Is_InSubmodule()` check in `BuildState`'s else-branch so submodule files always get `Lock=Unlockable`. Defence-in-depth: `GetOrCreate_FileState` also stamps Unlockable at creation via `Set_SubmodulePaths()`; `Cmd_CheckOut` short-circuits for submodule paths (clears read-only, emits Unlockable, returns success) as a last-resort safety net.
+5. **Submodule routing — predicates vs commands** — State predicates are submodule-agnostic; only `bInSubmodule` is carried through and `IsSourceControlled()`/`IsCurrent()` are forced true for submodule files (the latter because we don't poll their remotes). Everything else (locking, commits, deletes, adds) is decided by the same lock + tree state that drives outer-repo files, and the actual repo routing is done by commands via `PartitionByRepo` + `Provider::Open_SubmoduleRepositoryFor` (libgit2) or `FGitLink_Subprocess::Run/RunLfs(args, cwdOverride)` (subprocess). When adding a new command that mutates the working tree or talks to LFS, **always partition first** — never assume `InCtx.Repository` is the right handle for the input batch.
 
 6. **git commit commits the entire index** — libgit2's `git_commit_create` always commits from the current index tree. When multiple changelists have files staged, submitting one changelist must temporarily unstage the others (see CheckIn cross-CL isolation above).
 
