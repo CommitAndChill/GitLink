@@ -84,6 +84,19 @@ public:
 	};
 	auto QueryLfsLocks_Verified(const FString& InCwdOverride = FString()) -> FLfsLocksSnapshot;
 
+	// Parses the JSON document produced by `git lfs locks --verify --json` into an
+	// FLfsLocksSnapshot. Exposed as a static method so tests can exercise the parser
+	// against canned input without spawning a subprocess.
+	//
+	// Output contract:
+	//   - bSuccess is true iff the JSON parses cleanly. An empty {"ours":[],"theirs":[]}
+	//     counts as success — the caller wants to distinguish "no locks" (which clears
+	//     stale cached locks) from "couldn't query" (which leaves the cache alone).
+	//   - AllLocks holds every lock keyed by repo-relative forward-slashed path → owner.
+	//   - OursPaths is the subset of AllLocks keys the server confirms we own.
+	//   - Locks missing the `path` field are silently skipped.
+	static auto Parse_LfsVerifyJson(const FString& InJsonText) -> FLfsLocksSnapshot;
+
 	// Runs `git <args>` and writes stdout (binary-safe) to InOutputFile.
 	// Used by FGitLink_Revision::Get to extract file content at a specific commit.
 	// Returns true on success (exit code 0).
