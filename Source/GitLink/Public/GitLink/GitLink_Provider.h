@@ -143,6 +143,26 @@ public:
 	// the file is not in a submodule.
 	auto Get_SubmoduleRoot(const FString& InAbsolutePath) const -> FString;
 
+	// Opens a fresh FRepository rooted at the submodule that contains InAbsolutePath.
+	// Returns nullptr if the path is not inside a known submodule, or if the open fails.
+	// Used by command implementations (Cmd_Delete, Cmd_Revert) to route libgit2 ops into
+	// the inner repo so working-tree mutations land in the submodule's index, not the
+	// parent's.
+	auto Open_SubmoduleRepositoryFor(const FString& InAbsolutePath) const
+		-> TUniquePtr<gitlink::FRepository>;
+
+	// Snapshot of the absolute submodule working-tree paths discovered at connect time.
+	// Each entry has a trailing forward-slash. Used by Cmd_UpdateStatus / Cmd_Connect to
+	// iterate over submodules for per-submodule LFS lock polling.
+	auto Get_SubmodulePaths() const -> TArray<FString> { return _SubmodulePaths; }
+
+	// Subset of Get_SubmodulePaths that have LFS configured (i.e. contain `filter=lfs` or
+	// `lockable` patterns in their .gitattributes). Used to scope the per-poll LFS lock
+	// query to repos that actually have lockable content — most submodules in a typical
+	// project (source-only plugins, etc.) don't have LFS at all, and polling them costs
+	// a network round-trip per poll for nothing. Probed once at connect time.
+	auto Get_LfsSubmodulePaths() const -> TArray<FString> { return _LfsSubmodulePaths; }
+
 	auto Get_PathToRepositoryRoot() const -> const FString& { return _PathToRepositoryRoot; }
 	auto Get_UserName()             const -> const FString& { return _UserName; }
 	auto Get_UserEmail()            const -> const FString& { return _UserEmail; }
@@ -186,6 +206,10 @@ private:
 	// git_submodule_foreach. Used by Is_InSubmodule to detect files that should not
 	// be checked out / checked in from the parent repo.
 	TArray<FString> _SubmodulePaths;
+
+	// Subset of _SubmodulePaths whose .gitattributes mentions LFS (filter=lfs or lockable).
+	// Populated at connect time. Used to scope per-poll LFS lock queries.
+	TArray<FString> _LfsSubmodulePaths;
 
 	FString _PathToRepositoryRoot;  // resolved working tree root
 	FString _UserName;
