@@ -12,6 +12,7 @@
 #include "Slate/SGitLink_Settings.h"
 
 #include <Misc/App.h>
+#include <Misc/FileHelper.h>
 #include <UObject/ObjectSaveContext.h>
 #include <UObject/Package.h>
 
@@ -93,6 +94,8 @@ auto FGitLink_Provider::Close() -> void
 	_bGitRepositoryFound = false;
 	_bLfsAvailable = false;
 	_LockableExtensions.Reset();
+	_SubmodulePaths.Reset();
+	_LfsSubmodulePaths.Reset();
 	_PathToRepositoryRoot.Reset();
 	_UserName.Reset();
 	_UserEmail.Reset();
@@ -190,6 +193,40 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		// creation time. This closes the timing window (CLAUDE.md Pitfall #5) where
 		// GetOrCreate_FileState is called before GetState() has had a chance to annotate.
 		_StateCache->Set_SubmodulePaths(_SubmodulePaths);
+
+		// Probe each submodule's .gitattributes to identify which ones actually use LFS.
+		// We use this list to scope per-poll LFS lock queries — most submodules in a typical
+		// project (source-only plugins, tooling, etc.) don't have LFS at all, and querying
+		// 30+ remotes per 30-second poll cycle when only a handful actually have lockable
+		// content is the dominant CPU cost in the editor.
+		//
+		// Cheap probe: read up to 8 KB from <submodule>/.gitattributes (top-level only — the
+		// vast majority of LFS configurations live there) and look for `filter=lfs` or
+		// `lockable`. False positives are harmless (just an extra remote poll), false
+		// negatives mean a submodule's locks won't appear until we manually refresh.
+		_LfsSubmodulePaths.Reset();
+		for (const FString& SubPath : _SubmodulePaths)
+		{
+			const FString GitAttrPath = SubPath + TEXT(".gitattributes");
+			FString GitAttrContent;
+			if (!FFileHelper::LoadFileToString(GitAttrContent, *GitAttrPath))
+			{ continue; }
+
+			const bool bUsesLfs =
+				   GitAttrContent.Contains(TEXT("filter=lfs"), ESearchCase::IgnoreCase)
+				|| GitAttrContent.Contains(TEXT("lockable"),  ESearchCase::IgnoreCase);
+
+			if (bUsesLfs)
+			{
+				_LfsSubmodulePaths.Add(SubPath);
+				UE_LOG(LogGitLink, Verbose,
+					TEXT("CheckRepositoryStatus: LFS submodule: '%s'"), *SubPath);
+			}
+		}
+
+		UE_LOG(LogGitLink, Log,
+			TEXT("CheckRepositoryStatus: %d/%d submodules use LFS (others skipped during lock polls)"),
+			_LfsSubmodulePaths.Num(), _SubmodulePaths.Num());
 
 		for (const FString& SubPath : _SubmodulePaths)
 		{
@@ -357,22 +394,17 @@ auto FGitLink_Provider::GetState(
 
 		FGitLink_FileStateRef State = _StateCache->GetOrCreate_FileState(Normalized);
 
-		// Files inside submodules should not be checkable-out / checkable-in from the
-		// parent repo. Mark them as Unlockable + Unmodified so all action predicates
-		// (CanCheckout, CanCheckIn, CanRevert, CanAdd) return false while
-		// IsSourceControlled returns true. History still works via submodule repo open.
-		// Always stamp on every GetState call — submodule paths may not be populated
-		// during early init, so a previous query might have left Lock=Unknown.
+		// Stamp the bInSubmodule flag so command code can partition the batch by repo.
+		// Predicates are otherwise submodule-agnostic — submodule files are lockable,
+		// checkoutable, etc. on the same basis as outer-repo files. Real lock state comes
+		// from the per-submodule LFS poll in Cmd_UpdateStatus.
 		if (Is_InSubmodule(Normalized))
 		{
-			// Mark as in-submodule. The FGitLink_FileState predicates special-case this flag:
-			//   - IsCheckedOut() returns true → UE's PromptToCheckoutPackages short-circuits
-			//     via `bAlreadyCheckedOut = IsCheckedOut() || IsAdded()`, no dialog.
-			//   - IsSourceControlled() returns true → History right-click stays enabled.
-			//   - CanCheckout/CanCheckIn/CanRevert/CanAdd/CanDelete all return false → no
-			//     bogus menu items that would try to operate on the parent repo.
 			State->_State.bInSubmodule = true;
-			State->_State.Lock = EGitLink_LockState::Unlockable;
+
+			// If we don't yet have a real Tree state for this file, default to Unmodified
+			// — it's tracked in the submodule's repo, just not visible from the parent's
+			// libgit2 status walk (which doesn't recurse into submodules).
 			if (State->_State.Tree == EGitLink_TreeState::NotInRepo ||
 				State->_State.Tree == EGitLink_TreeState::Unset)
 			{
@@ -675,6 +707,26 @@ auto FGitLink_Provider::Get_SubmoduleRoot(const FString& InAbsolutePath) const -
 		{ return SubPath; }
 	}
 	return FString();
+}
+
+auto FGitLink_Provider::Open_SubmoduleRepositoryFor(const FString& InAbsolutePath) const
+	-> TUniquePtr<gitlink::FRepository>
+{
+	const FString SubmoduleRoot = Get_SubmoduleRoot(InAbsolutePath);
+	if (SubmoduleRoot.IsEmpty())
+	{ return nullptr; }
+
+	gitlink::FOpenParams Params;
+	Params.Path = SubmoduleRoot;
+	TUniquePtr<gitlink::FRepository> Repo = gitlink::FRepository::Open(Params);
+	if (!Repo.IsValid())
+	{
+		UE_LOG(LogGitLink, Warning,
+			TEXT("Open_SubmoduleRepositoryFor: failed to open submodule repo at '%s' (last error: %s)"),
+			*SubmoduleRoot, *gitlink::FRepository::Get_LastOpenError());
+		return nullptr;
+	}
+	return Repo;
 }
 
 auto FGitLink_Provider::Broadcast_StateChanged() -> void
