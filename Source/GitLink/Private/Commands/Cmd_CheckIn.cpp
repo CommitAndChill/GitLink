@@ -16,10 +16,186 @@
 //
 // The editor passes the full set of files to commit. We stage them (even if they were already
 // staged by an earlier MarkForAdd — git_index_add_all is idempotent) and then build a commit.
+//
+// Submodule files: input batch is partitioned by submodule root. Each repo gets its own
+// commit (with the same description). Outer-repo commits use the existing path including
+// subprocess-fallback for hooks and cross-changelist isolation; submodule commits use
+// libgit2 in-process always (we don't probe submodule hooks, and changelists are
+// outer-repo-only).
 // --------------------------------------------------------------------------------------------------------------------
 
 namespace gitlink::cmd
 {
+	namespace
+	{
+		// Commits the given outer-repo bucket. Encapsulates the existing CheckIn logic
+		// (cross-changelist isolation, subprocess-vs-libgit2 commit selection) so the new
+		// per-submodule path can stay simple.
+		auto CommitOuterRepo(
+			FCommandContext& InCtx,
+			const FRepoBatch& InBatch,
+			const TArray<FString>& InGatheredRelPathsIfFromChangelist,  // empty if from explicit InFiles
+			const FText& InDescription) -> FCommandResult
+		{
+			// Stage the bucket. If InGathered is non-empty we're in View-Changes mode and have
+			// already gathered the relative paths from the changelist; otherwise stage the
+			// explicit batch.
+			const TArray<FString>& StageRelPaths = InGatheredRelPathsIfFromChangelist.IsEmpty()
+				? InBatch.RelativeFiles
+				: InGatheredRelPathsIfFromChangelist;
+
+			if (StageRelPaths.IsEmpty())
+			{
+				return FCommandResult::Fail(LOCTEXT("NothingToCommit",
+					"GitLink: nothing to commit — no files in changelists."));
+			}
+
+			UE_LOG(LogGitLink, Log,
+				TEXT("Cmd_CheckIn: staging %d outer-repo file(s) (first: '%s')"),
+				StageRelPaths.Num(), *StageRelPaths[0]);
+
+			const FResult StageRes = InCtx.Repository->Stage(StageRelPaths);
+			if (!StageRes)
+			{
+				return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
+			}
+
+			// Cross-changelist isolation: temporarily unstage files from OTHER changelists so
+			// they don't leak into this commit. Only meaningful for the outer repo because
+			// changelists are tracked against the outer repo's index.
+			TArray<FString> FilesToRestage;
+			if (InCtx.DestinationChangelist.IsValid())
+			{
+				const FGitLink_Changelist* SourceCL =
+					static_cast<const FGitLink_Changelist*>(InCtx.DestinationChangelist.Get());
+				const FString SourceName = SourceCL->Get_Name();
+
+				const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
+				for (const FGitLink_ChangelistStateRef& CL : AllCL)
+				{
+					if (CL->_Changelist.Get_Name() == SourceName || CL->_Files.Num() == 0)
+					{ continue; }
+
+					TArray<FString> OtherRelPaths;
+					for (const FSourceControlStateRef& FileState : CL->_Files)
+					{
+						// Skip submodule files — they live in submodule indexes, not the outer one.
+						if (InCtx.Provider.Is_InSubmodule(FileState->GetFilename()))
+						{ continue; }
+
+						const FString Rel = ToRepoRelativePath(InCtx.RepoRootAbsolute, FileState->GetFilename());
+						OtherRelPaths.Add(Rel);
+						FilesToRestage.Add(Rel);
+					}
+
+					if (!OtherRelPaths.IsEmpty())
+					{
+						InCtx.Repository->Unstage(OtherRelPaths);
+						UE_LOG(LogGitLink, Log,
+							TEXT("Cmd_CheckIn: temporarily unstaged %d file(s) from '%s' changelist"),
+							OtherRelPaths.Num(), *CL->_Changelist.Get_Name());
+					}
+				}
+			}
+
+			// Subprocess vs libgit2 commit.
+			const bool bUseSubprocess =
+				InCtx.Provider.NeedsSubprocessForCommit() &&
+				InCtx.Subprocess != nullptr &&
+				InCtx.Subprocess->IsValid();
+
+			if (bUseSubprocess)
+			{
+				TArray<FString> CommitArgs;
+				CommitArgs.Add(TEXT("commit"));
+				CommitArgs.Add(TEXT("-m"));
+				CommitArgs.Add(InDescription.ToString());
+
+				const FGitLink_SubprocessResult SubResult = InCtx.Subprocess->Run(CommitArgs);
+				if (!SubResult.IsSuccess())
+				{
+					if (!FilesToRestage.IsEmpty())
+					{ InCtx.Repository->Stage(FilesToRestage); }
+					return FCommandResult::Fail(FText::Format(
+						LOCTEXT("SubprocessCommitFailed", "GitLink: git commit (subprocess) failed: {0}"),
+						FText::FromString(SubResult.Get_CombinedError())));
+				}
+
+				UE_LOG(LogGitLink, Log,
+					TEXT("Cmd_CheckIn: outer commit via subprocess (hooks ran): %s"),
+					*SubResult.StdOut.TrimStartAndEnd());
+			}
+			else
+			{
+				gitlink::FCommitParams Params;
+				Params.Message = InDescription.ToString();
+
+				const FResult CommitRes = InCtx.Repository->Commit(Params);
+				if (!CommitRes)
+				{
+					if (!FilesToRestage.IsEmpty())
+					{ InCtx.Repository->Stage(FilesToRestage); }
+					return FCommandResult::Fail(FText::FromString(CommitRes.ErrorMessage));
+				}
+			}
+
+			if (!FilesToRestage.IsEmpty())
+			{
+				InCtx.Repository->Stage(FilesToRestage);
+				UE_LOG(LogGitLink, Log,
+					TEXT("Cmd_CheckIn: re-staged %d file(s) from other changelists"),
+					FilesToRestage.Num());
+			}
+
+			return FCommandResult::Ok();
+		}
+
+		// Commits the given submodule bucket. Always libgit2 in-process — no hook probing,
+		// no changelist isolation (changelists are outer-repo-only).
+		auto CommitSubmodule(
+			FCommandContext& InCtx,
+			const FRepoBatch& InBatch,
+			const FText& InDescription) -> FCommandResult
+		{
+			TUniquePtr<gitlink::FRepository> SubRepo =
+				InCtx.Provider.Open_SubmoduleRepositoryFor(InBatch.AbsoluteFiles[0]);
+			if (!SubRepo.IsValid())
+			{
+				return FCommandResult::Fail(FText::Format(
+					LOCTEXT("SubOpenFailed", "GitLink: could not open submodule repo at '{0}'"),
+					FText::FromString(InBatch.RepoRoot)));
+			}
+
+			UE_LOG(LogGitLink, Log,
+				TEXT("Cmd_CheckIn: staging %d file(s) in submodule '%s'"),
+				InBatch.RelativeFiles.Num(), *InBatch.RepoRoot);
+
+			const FResult StageRes = SubRepo->Stage(InBatch.RelativeFiles);
+			if (!StageRes)
+			{
+				return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
+			}
+
+			gitlink::FCommitParams Params;
+			Params.Message = InDescription.ToString();
+
+			const FResult CommitRes = SubRepo->Commit(Params);
+			if (!CommitRes)
+			{
+				return FCommandResult::Fail(FText::Format(
+					LOCTEXT("SubCommitFailed", "GitLink: submodule '{0}' commit failed: {1}"),
+					FText::FromString(InBatch.RepoRoot),
+					FText::FromString(CommitRes.ErrorMessage)));
+			}
+
+			UE_LOG(LogGitLink, Log,
+				TEXT("Cmd_CheckIn: committed %d file(s) in submodule '%s'"),
+				InBatch.RelativeFiles.Num(), *InBatch.RepoRoot);
+
+			return FCommandResult::Ok();
+		}
+	}
+
 	auto CheckIn(
 		FCommandContext&                  InCtx,
 		const FSourceControlOperationRef& InOperation,
@@ -39,233 +215,93 @@ namespace gitlink::cmd
 				"GitLink: cannot check in — commit description is empty."));
 		}
 
-		// Stage files for commit. The editor passes absolute paths but libgit2's
-		// git_index_add_all needs repo-relative pathspecs — convert before staging.
-		//
-		// When submitting from View Changes, the editor calls CheckIn with an EMPTY
-		// file list (files are in the changelist, not InFiles). In that case we stage
-		// all dirty files, matching `git commit -a` behaviour.
+		// Build the unified absolute-path list. If InFiles is empty (View Changes submit),
+		// gather from the destination changelist (or all changelists as fallback).
+		TArray<FString> AllAbsolute;
+		bool bFromChangelist = false;
+
 		if (!InFiles.IsEmpty())
 		{
-			TArray<FString> RelativePaths;
-			RelativePaths.Reserve(InFiles.Num());
-			for (const FString& File : InFiles)
-			{
-				RelativePaths.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, File));
-			}
-
-			UE_LOG(LogGitLink, Log,
-				TEXT("Cmd_CheckIn: staging %d file(s) (first: '%s')"),
-				RelativePaths.Num(),
-				RelativePaths.Num() > 0 ? *RelativePaths[0] : TEXT("<none>"));
-
-			const FResult StageRes = InCtx.Repository->Stage(RelativePaths);
-			if (!StageRes)
-			{
-				return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
-			}
+			AllAbsolute = InFiles;
 		}
 		else
 		{
-			// No explicit file list — View Changes submit path. Gather files from the
-			// specific changelist being submitted (if provided), or all changelists as
-			// fallback. We can't use StageAll() because it tries to stage submodule
-			// directories which libgit2 rejects with "invalid path".
-			TArray<FString> ChangelistRelPaths;
+			bFromChangelist = true;
+			const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
 
 			if (InCtx.DestinationChangelist.IsValid())
 			{
-				// Submit from a specific changelist — only stage its files.
 				const FGitLink_Changelist* SourceCL =
 					static_cast<const FGitLink_Changelist*>(InCtx.DestinationChangelist.Get());
 				const FString SourceName = SourceCL->Get_Name();
 
-				const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
 				for (const FGitLink_ChangelistStateRef& CL : AllCL)
 				{
 					if (CL->_Changelist.Get_Name() != SourceName)
 					{ continue; }
-
 					for (const FSourceControlStateRef& FileState : CL->_Files)
-					{
-						ChangelistRelPaths.Add(
-							ToRepoRelativePath(InCtx.RepoRootAbsolute, FileState->GetFilename()));
-					}
+					{ AllAbsolute.Add(FileState->GetFilename()); }
 					break;
 				}
 			}
 			else
 			{
-				// No specific changelist — gather from all (legacy fallback).
-				const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
 				for (const FGitLink_ChangelistStateRef& CL : AllCL)
 				{
 					for (const FSourceControlStateRef& FileState : CL->_Files)
-					{
-						ChangelistRelPaths.Add(
-							ToRepoRelativePath(InCtx.RepoRootAbsolute, FileState->GetFilename()));
-					}
+					{ AllAbsolute.Add(FileState->GetFilename()); }
 				}
 			}
 
-			if (ChangelistRelPaths.IsEmpty())
+			if (AllAbsolute.IsEmpty())
 			{
 				return FCommandResult::Fail(LOCTEXT("NothingToCommit",
 					"GitLink: nothing to commit — no files in changelists."));
 			}
+		}
 
-			UE_LOG(LogGitLink, Log,
-				TEXT("Cmd_CheckIn: staging %d changelist file(s) (first: '%s')"),
-				ChangelistRelPaths.Num(),
-				*ChangelistRelPaths[0]);
+		const TArray<FRepoBatch> Batches = PartitionByRepo(InCtx, AllAbsolute);
 
-			const FResult StageRes = InCtx.Repository->Stage(ChangelistRelPaths);
-			if (!StageRes)
+		// Commit each bucket. Outer first (so the outer commit's hook side-effects are
+		// visible to subsequent submodule commits if any), then each submodule.
+		for (const FRepoBatch& Batch : Batches)
+		{
+			if (Batch.RelativeFiles.IsEmpty())
+			{ continue; }
+
+			const FCommandResult RepoResult = Batch.bIsSubmodule
+				? CommitSubmodule(InCtx, Batch, Description)
+				: CommitOuterRepo(
+					InCtx, Batch,
+					bFromChangelist ? Batch.RelativeFiles : TArray<FString>(),
+					Description);
+
+			if (!RepoResult.bOk)
 			{
-				return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
+				return RepoResult;
 			}
 		}
 
-		// If submitting a specific changelist, temporarily unstage files from OTHER
-		// changelists so they don't get swept into this commit. git commit always
-		// commits everything in the index, so if file B was previously staged via
-		// MoveToChangelist and we only want to commit file A from Working, we must
-		// unstage B first, commit, then re-stage B.
-		TArray<FString> FilesToRestage;
-		if (InCtx.DestinationChangelist.IsValid())
-		{
-			const FGitLink_Changelist* SourceCL =
-				static_cast<const FGitLink_Changelist*>(InCtx.DestinationChangelist.Get());
-			const FString SourceName = SourceCL->Get_Name();
-
-			const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
-			for (const FGitLink_ChangelistStateRef& CL : AllCL)
-			{
-				if (CL->_Changelist.Get_Name() == SourceName || CL->_Files.Num() == 0)
-				{ continue; }
-
-				// This changelist is NOT being submitted — unstage its files temporarily.
-				TArray<FString> OtherRelPaths;
-				for (const FSourceControlStateRef& FileState : CL->_Files)
-				{
-					const FString Rel = ToRepoRelativePath(InCtx.RepoRootAbsolute, FileState->GetFilename());
-					OtherRelPaths.Add(Rel);
-					FilesToRestage.Add(Rel);
-				}
-
-				if (!OtherRelPaths.IsEmpty())
-				{
-					InCtx.Repository->Unstage(OtherRelPaths);
-					UE_LOG(LogGitLink, Log,
-						TEXT("Cmd_CheckIn: temporarily unstaged %d file(s) from '%s' changelist"),
-						OtherRelPaths.Num(), *CL->_Changelist.Get_Name());
-				}
-			}
-		}
-
-		// Two commit paths:
-		//   A. Subprocess (git.exe): when the repo has pre-commit or commit-msg hooks, because
-		//      libgit2 silently skips all hooks and the user expects them to run. This path
-		//      shells out to `git commit -m "..."` which runs the hooks natively.
-		//   B. In-process (libgit2): the fast default when no hooks are present.
-		//
-		// The setting bSubprocessFallbackForHooks gates path A entirely; if disabled, all
-		// commits go through libgit2 regardless of hooks. That's the user's choice — they
-		// accept that hooks won't run but get the speed benefit.
-		const bool bUseSubprocess =
-			InCtx.Provider.NeedsSubprocessForCommit() &&
-			InCtx.Subprocess != nullptr &&
-			InCtx.Subprocess->IsValid();
-
-		if (bUseSubprocess)
-		{
-			// Subprocess commit. The stage step above used libgit2 (fast, in-process), and
-			// now we shell out to git.exe for the commit itself so hooks run.
-			TArray<FString> CommitArgs;
-			CommitArgs.Add(TEXT("commit"));
-			CommitArgs.Add(TEXT("-m"));
-			CommitArgs.Add(Description.ToString());
-
-			const FGitLink_SubprocessResult SubResult = InCtx.Subprocess->Run(CommitArgs);
-			if (!SubResult.IsSuccess())
-			{
-				if (!FilesToRestage.IsEmpty())
-				{ InCtx.Repository->Stage(FilesToRestage); }
-				return FCommandResult::Fail(FText::Format(
-					LOCTEXT("SubprocessCommitFailed", "GitLink: git commit (subprocess) failed: {0}"),
-					FText::FromString(SubResult.Get_CombinedError())));
-			}
-
-			UE_LOG(LogGitLink, Log,
-				TEXT("Cmd_CheckIn: committed via subprocess (hooks ran): %s"),
-				*SubResult.StdOut.TrimStartAndEnd());
-		}
-		else
-		{
-			// In-process commit via libgit2 (fast, no hook execution).
-			gitlink::FCommitParams Params;
-			Params.Message = Description.ToString();
-
-			const FResult CommitRes = InCtx.Repository->Commit(Params);
-			if (!CommitRes)
-			{
-				// Re-stage before returning on error so we don't leave the index dirty.
-				if (!FilesToRestage.IsEmpty())
-				{ InCtx.Repository->Stage(FilesToRestage); }
-				return FCommandResult::Fail(FText::FromString(CommitRes.ErrorMessage));
-			}
-		}
-
-		// Re-stage files from other changelists that we temporarily unstaged.
-		if (!FilesToRestage.IsEmpty())
-		{
-			InCtx.Repository->Stage(FilesToRestage);
-			UE_LOG(LogGitLink, Log,
-				TEXT("Cmd_CheckIn: re-staged %d file(s) from other changelists"),
-				FilesToRestage.Num());
-		}
-
-		// Build the unified list of committed files. If InFiles was empty (View Changes
-		// submit), reconstruct from the specific changelist being submitted (matching
-		// the staging logic above).
-		TArray<FString> CommittedFiles = InFiles;
-		if (CommittedFiles.IsEmpty())
-		{
-			const TArray<FGitLink_ChangelistStateRef> AllCL = InCtx.StateCache.Enumerate_Changelists();
-			for (const FGitLink_ChangelistStateRef& CL : AllCL)
-			{
-				// If a specific changelist was provided, only gather from that one.
-				if (InCtx.DestinationChangelist.IsValid())
-				{
-					const FGitLink_Changelist* SourceCL =
-						static_cast<const FGitLink_Changelist*>(InCtx.DestinationChangelist.Get());
-					if (CL->_Changelist.Get_Name() != SourceCL->Get_Name())
-					{ continue; }
-				}
-
-				for (const FSourceControlStateRef& FileState : CL->_Files)
-				{
-					CommittedFiles.Add(FileState->GetFilename());
-				}
-			}
-		}
-
-		// Release LFS locks unless the user checked "Keep Files Checked Out".
+		// Release LFS locks (per-repo via Release_LfsLocksBestEffort) unless the user
+		// checked "Keep Files Checked Out".
 		const bool bKeepCheckedOut = CheckInOp->GetKeepCheckedOut();
 		if (!bKeepCheckedOut)
 		{
-			Release_LfsLocksBestEffort(InCtx, CommittedFiles);
+			Release_LfsLocksBestEffort(InCtx, AllAbsolute);
 		}
 
 		// Build predictive Unmodified states for the committed files.
 		FCommandResult Result = FCommandResult::Ok();
-		Result.UpdatedStates.Reserve(CommittedFiles.Num());
-		for (const FString& File : CommittedFiles)
+		Result.UpdatedStates.Reserve(AllAbsolute.Num());
+		for (const FString& File : AllAbsolute)
 		{
-			const bool bLockable = InCtx.Provider.Is_FileLockable(File);
+			const bool bLockable    = InCtx.Provider.Is_FileLockable(File);
+			const bool bSubmodule   = InCtx.Provider.Is_InSubmodule(File);
+
 			FGitLink_CompositeState Composite;
-			Composite.File = EGitLink_FileState::Unknown;
-			Composite.Tree = EGitLink_TreeState::Unmodified;
+			Composite.File          = EGitLink_FileState::Unknown;
+			Composite.Tree          = EGitLink_TreeState::Unmodified;
+			Composite.bInSubmodule  = bSubmodule;
 
 			if (bKeepCheckedOut && bLockable)
 			{
@@ -279,9 +315,11 @@ namespace gitlink::cmd
 			Result.UpdatedStates.Add(Make_FileState(Normalize_AbsolutePath(File), Composite));
 		}
 
+		const int32 RepoCount = Batches.Num();
 		CheckInOp->SetSuccessMessage(FText::Format(
-			LOCTEXT("CheckInSuccess", "Committed {0} file(s) on branch '{1}'."),
-			FText::AsNumber(CommittedFiles.Num()),
+			LOCTEXT("CheckInSuccess", "Committed {0} file(s) across {1} repo(s) on branch '{2}'."),
+			FText::AsNumber(AllAbsolute.Num()),
+			FText::AsNumber(RepoCount),
 			FText::FromString(InCtx.Provider.Get_BranchName())));
 
 		Result.InfoMessages.Add(CheckInOp->GetSuccessMessage());
