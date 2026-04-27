@@ -32,6 +32,7 @@ public class GitLink : ModuleRules
 			"EditorStyle",
 			"ToolMenus",
 			"ContentBrowser",
+			"Json",
 		});
 	}
 }

@@ -2,10 +2,13 @@
 
 #include "GitLinkLog.h"
 
+#include <Dom/JsonObject.h>
 #include <HAL/FileManager.h>
 #include <HAL/PlatformProcess.h>
 #include <Misc/FileHelper.h>
 #include <Misc/Paths.h>
+#include <Serialization/JsonReader.h>
+#include <Serialization/JsonSerializer.h>
 
 // --------------------------------------------------------------------------------------------------------------------
 
@@ -60,7 +63,8 @@ FGitLink_Subprocess::FGitLink_Subprocess(FString InGitBinary, FString InWorkingD
 {
 }
 
-auto FGitLink_Subprocess::Run(const TArray<FString>& InArgs) -> FGitLink_SubprocessResult
+auto FGitLink_Subprocess::Run(const TArray<FString>& InArgs, const FString& InCwdOverride)
+	-> FGitLink_SubprocessResult
 {
 	FGitLink_SubprocessResult Result;
 
@@ -71,10 +75,11 @@ auto FGitLink_Subprocess::Run(const TArray<FString>& InArgs) -> FGitLink_Subproc
 	}
 
 	const FString ArgsStr = JoinArgs(InArgs);
+	const FString& EffectiveCwd = InCwdOverride.IsEmpty() ? _WorkingDirectory : InCwdOverride;
 
 	UE_LOG(LogGitLink, Verbose,
 		TEXT("Subprocess: %s %s  (cwd=%s)"),
-		*_GitBinary, *ArgsStr, *_WorkingDirectory);
+		*_GitBinary, *ArgsStr, *EffectiveCwd);
 
 	int32   ExitCode = -1;
 	FString StdOut;
@@ -86,7 +91,7 @@ auto FGitLink_Subprocess::Run(const TArray<FString>& InArgs) -> FGitLink_Subproc
 		&ExitCode,
 		&StdOut,
 		&StdErr,
-		_WorkingDirectory.IsEmpty() ? nullptr : *_WorkingDirectory);
+		EffectiveCwd.IsEmpty() ? nullptr : *EffectiveCwd);
 
 	Result.bSpawned = bSpawned;
 	Result.ExitCode = ExitCode;
@@ -109,13 +114,14 @@ auto FGitLink_Subprocess::Run(const TArray<FString>& InArgs) -> FGitLink_Subproc
 	return Result;
 }
 
-auto FGitLink_Subprocess::RunLfs(const TArray<FString>& InArgs) -> FGitLink_SubprocessResult
+auto FGitLink_Subprocess::RunLfs(const TArray<FString>& InArgs, const FString& InCwdOverride)
+	-> FGitLink_SubprocessResult
 {
 	TArray<FString> LfsArgs;
 	LfsArgs.Reserve(InArgs.Num() + 1);
 	LfsArgs.Add(TEXT("lfs"));
 	LfsArgs.Append(InArgs);
-	return Run(LfsArgs);
+	return Run(LfsArgs, InCwdOverride);
 }
 
 auto FGitLink_Subprocess::IsLfsAvailable() -> bool
@@ -208,93 +214,87 @@ auto FGitLink_Subprocess::ProbeLockableExtensions(const TArray<FString>& InWildc
 	return Out;
 }
 
-auto FGitLink_Subprocess::QueryLfsLocks_Local() -> TMap<FString, FString>
+auto FGitLink_Subprocess::QueryLfsLocks_Verified(const FString& InCwdOverride) -> FLfsLocksSnapshot
 {
-	TMap<FString, FString> Out;
+	FLfsLocksSnapshot Out;
 	if (!IsValid())
 	{ return Out; }
 
-	// `git lfs locks --local` lists locks held by the current user. Output format:
-	//   Content/Path/To/File.uasset	Neil Koo	ID:12345
-	// Tab-separated: path, owner, id.
-	const FGitLink_SubprocessResult Result = RunLfs({ TEXT("locks"), TEXT("--local") });
+	// `git lfs locks --verify --json` is a network call that asks the LFS server which of
+	// the listed locks the current user actually owns. The server is the source of truth
+	// — `git config user.name` may differ from the LFS server's recorded owner identity,
+	// so any owner-comparison done client-side is unreliable. The `--local` flag (used by
+	// earlier versions of this code) is also unreliable — its cache contents include locks
+	// from other users after any prior remote query, despite the docs saying otherwise.
+	//
+	// JSON shape (git-lfs 3.x):
+	//   { "ours":   [{"id":"..","path":"..","owner":{"name":".."}, "locked_at":".."}],
+	//     "theirs": [{"id":"..","path":"..","owner":{"name":".."}, "locked_at":".."}] }
+	const FGitLink_SubprocessResult Result = RunLfs(
+		{ TEXT("locks"), TEXT("--verify"), TEXT("--json") },
+		InCwdOverride);
+
 	if (!Result.IsSuccess())
 	{
 		UE_LOG(LogGitLink, Verbose,
-			TEXT("QueryLfsLocks_Local: git lfs locks --local failed: %s"),
+			TEXT("QueryLfsLocks_Verified: git lfs locks --verify --json failed: %s"),
 			*Result.Get_CombinedError());
 		return Out;
 	}
 
-	TArray<FString> Lines;
-	Result.StdOut.ParseIntoArrayLines(Lines, /*bCullEmpty=*/ true);
-
-	for (const FString& Line : Lines)
+	const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(Result.StdOut);
+	TSharedPtr<FJsonObject> Root;
+	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
 	{
-		// Parse tab-separated fields. git-lfs uses tabs between columns.
-		FString Trimmed = Line.TrimStartAndEnd();
-		if (Trimmed.IsEmpty())
-		{ continue; }
-
-		// The output format is: <path>\t<owner>\t<id>
-		// But some versions use variable whitespace. Split on tab first.
-		TArray<FString> Parts;
-		Trimmed.ParseIntoArray(Parts, TEXT("\t"), /*bCullEmpty=*/ true);
-
-		if (Parts.Num() >= 2)
-		{
-			FString Path  = Parts[0].TrimStartAndEnd();
-			FString Owner = Parts[1].TrimStartAndEnd();
-
-			// Normalize to forward slashes
-			Path.ReplaceInline(TEXT("\\"), TEXT("/"));
-
-			Out.Add(MoveTemp(Path), MoveTemp(Owner));
-		}
-	}
-
-	return Out;
-}
-
-auto FGitLink_Subprocess::QueryLfsLocks_Remote() -> TMap<FString, FString>
-{
-	TMap<FString, FString> Out;
-	if (!IsValid())
-	{ return Out; }
-
-	// `git lfs locks` (no --local) queries the remote LFS server for ALL locks.
-	// Output format is identical to --local: tab-separated path, owner, id.
-	const FGitLink_SubprocessResult Result = RunLfs({ TEXT("locks") });
-	if (!Result.IsSuccess())
-	{
-		UE_LOG(LogGitLink, Verbose,
-			TEXT("QueryLfsLocks_Remote: git lfs locks failed: %s"),
-			*Result.Get_CombinedError());
+		UE_LOG(LogGitLink, Warning,
+			TEXT("QueryLfsLocks_Verified: could not parse JSON output (%d bytes)"),
+			Result.StdOut.Len());
 		return Out;
 	}
 
-	TArray<FString> Lines;
-	Result.StdOut.ParseIntoArrayLines(Lines, /*bCullEmpty=*/ true);
+	// JSON parsed → poll succeeded. Even an empty result (no locks) counts as success.
+	Out.bSuccess = true;
 
-	for (const FString& Line : Lines)
+	// Helper: pull out path + owner.name from a single lock object and add to the snapshot.
+	auto IngestArray = [&](const TArray<TSharedPtr<FJsonValue>>* InArray, bool bIsOurs)
 	{
-		FString Trimmed = Line.TrimStartAndEnd();
-		if (Trimmed.IsEmpty())
-		{ continue; }
-
-		TArray<FString> Parts;
-		Trimmed.ParseIntoArray(Parts, TEXT("\t"), /*bCullEmpty=*/ true);
-
-		if (Parts.Num() >= 2)
+		if (InArray == nullptr) { return; }
+		for (const TSharedPtr<FJsonValue>& Val : *InArray)
 		{
-			FString Path  = Parts[0].TrimStartAndEnd();
-			FString Owner = Parts[1].TrimStartAndEnd();
+			const TSharedPtr<FJsonObject>* AsObj = nullptr;
+			if (!Val.IsValid() || !Val->TryGetObject(AsObj) || !AsObj || !AsObj->IsValid())
+			{ continue; }
+
+			FString Path;
+			if (!(*AsObj)->TryGetStringField(TEXT("path"), Path) || Path.IsEmpty())
+			{ continue; }
+
+			FString OwnerName;
+			const TSharedPtr<FJsonObject>* OwnerObj = nullptr;
+			if ((*AsObj)->TryGetObjectField(TEXT("owner"), OwnerObj) && OwnerObj && OwnerObj->IsValid())
+			{
+				(*OwnerObj)->TryGetStringField(TEXT("name"), OwnerName);
+			}
 
 			Path.ReplaceInline(TEXT("\\"), TEXT("/"));
-
-			Out.Add(MoveTemp(Path), MoveTemp(Owner));
+			Out.AllLocks.Add(Path, OwnerName);
+			if (bIsOurs)
+			{ Out.OursPaths.Add(Path); }
 		}
-	}
+	};
+
+	const TArray<TSharedPtr<FJsonValue>>* OursArr   = nullptr;
+	const TArray<TSharedPtr<FJsonValue>>* TheirsArr = nullptr;
+	Root->TryGetArrayField(TEXT("ours"),   OursArr);
+	Root->TryGetArrayField(TEXT("theirs"), TheirsArr);
+	IngestArray(OursArr,   /*bIsOurs=*/ true);
+	IngestArray(TheirsArr, /*bIsOurs=*/ false);
+
+	UE_LOG(LogGitLink, Verbose,
+		TEXT("QueryLfsLocks_Verified (cwd='%s'): ours=%d, theirs=%d"),
+		InCwdOverride.IsEmpty() ? *_WorkingDirectory : *InCwdOverride,
+		Out.OursPaths.Num(),
+		Out.AllLocks.Num() - Out.OursPaths.Num());
 
 	return Out;
 }
