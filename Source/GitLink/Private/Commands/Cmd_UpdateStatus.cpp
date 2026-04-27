@@ -10,12 +10,24 @@
 
 #include <Misc/Paths.h>
 #include <SourceControlOperations.h>
+#include <Templates/Atomic.h>
 
 // Forward declare the blob size op so we can populate FGitLink_Revision::_FileSize in history.
 namespace gitlink::op
 {
 	auto Get_BlobSizeAtCommit(gitlink::FRepository& InRepo, const FString& InCommitHash, const FString& InRepoRelativePath) -> int64;
 	auto Enumerate_TrackedFiles(gitlink::FRepository& InRepo) -> TArray<FString>;
+}
+
+namespace
+{
+	// Throttle for the expensive cross-repo sweep (per-submodule git status + per-repo LFS
+	// lock poll). Background poll fires every 30s on the timer. Saves trigger an immediate
+	// re-poll which would otherwise re-run the full 34-repo sweep — that's the source of
+	// the visible CPU spikes. We skip the sweep if it ran recently; the regular 30s timer
+	// poll always runs because the throttle is < interval.
+	TAtomic<double> GLastFullSweepSec{0.0};
+	constexpr double GFullSweepThrottleSec = 20.0;
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -221,10 +233,11 @@ namespace gitlink::cmd
 			}
 			else
 			{
-				// Submodule files can never be locked from the parent repo regardless of
-				// extension — treat them as Unlockable so CanCheckout() returns false.
-				const bool bSubmodule = InCtx.Provider.Is_InSubmodule(InFilename);
-				const bool bLockable  = !bSubmodule && InCtx.Provider.Is_FileLockable(InFilename);
+				// Lockability is .gitattributes-driven and applies the same way to outer-repo
+				// and submodule files (most projects use a consistent set of lockable patterns).
+				// Real Lock=Locked/LockedOther state lands later from the per-submodule LFS
+				// poll in this same command's full-scan path.
+				const bool bLockable = InCtx.Provider.Is_FileLockable(InFilename);
 				State->_State.Lock = bLockable
 					? EGitLink_LockState::NotLocked
 					: EGitLink_LockState::Unlockable;
@@ -250,29 +263,135 @@ namespace gitlink::cmd
 
 		if (InFiles.IsEmpty())
 		{
-			// Full snapshot mode — emit a state for every dirty file only.
+			// Full snapshot mode. The expensive cross-repo sweep (per-submodule git status +
+			// per-repo LFS lock poll) is throttled — it always runs on the timer-driven
+			// background poll (30s interval) but is skipped on save-triggered immediate polls
+			// that fall inside the throttle window. Without this, every save would re-run
+			// 34 git status walks + 34 LFS network calls, causing visible CPU spikes.
+			const double NowSec = FPlatformTime::Seconds();
+			const double LastSweep = GLastFullSweepSec.Load();
+			const bool bRunSweep = (NowSec - LastSweep) >= GFullSweepThrottleSec;
+
+			const TArray<FString> SubmodulePaths = InCtx.Provider.Get_SubmodulePaths();
+			TSet<FString> SuccessfullyPolledRepos;  // absolute roots whose LFS poll returned trustworthy data
+
+			if (bRunSweep)
+			{
+				GLastFullSweepSec.Store(NowSec);
+
+				// Per-submodule git status. The parent status already populated CompositeByPath
+				// above. For each submodule, open its repo and run Get_Status, then merge the
+				// staged/unstaged buckets into CompositeByPath using the submodule root as the
+				// path base. Result: untracked / modified submodule files now show real File +
+				// Tree state, so CanCheckout's bUntracked guard works correctly.
+				if (!SubmodulePaths.IsEmpty())
+				{
+					struct FSubStatus
+					{
+						bool    bOpened = false;
+						FStatus Status;
+					};
+					TArray<FSubStatus> SubStatuses;
+					SubStatuses.SetNum(SubmodulePaths.Num());
+
+					ParallelFor_BoundedConcurrency(SubmodulePaths.Num(), GMaxConcurrentRepoWorkers, [&](int32 Idx)
+					{
+						TUniquePtr<gitlink::FRepository> SubRepo =
+							InCtx.Provider.Open_SubmoduleRepositoryFor(SubmodulePaths[Idx]);
+						if (SubRepo.IsValid())
+						{
+							SubStatuses[Idx].bOpened = true;
+							SubStatuses[Idx].Status  = SubRepo->Get_Status();
+						}
+					});
+
+					int32 SubDirty = 0;
+					for (int32 Idx = 0; Idx < SubmodulePaths.Num(); ++Idx)
+					{
+						if (!SubStatuses[Idx].bOpened)
+						{ continue; }
+
+						const FString& SubRoot = SubmodulePaths[Idx];
+						const FStatus& Snap    = SubStatuses[Idx].Status;
+						AppendBucket_WithLfs(Snap.Staged,     EStatusBucket::Staged,     SubRoot, CompositeByPath);
+						AppendBucket_WithLfs(Snap.Unstaged,   EStatusBucket::Unstaged,   SubRoot, CompositeByPath);
+						AppendBucket_WithLfs(Snap.Conflicted, EStatusBucket::Conflicted, SubRoot, CompositeByPath);
+						SubDirty += Snap.Num();
+					}
+
+					if (SubDirty > 0)
+					{
+						UE_LOG(LogGitLink, Verbose,
+							TEXT("Cmd_UpdateStatus: per-submodule status added %d dirty entries across %d submodule(s)"),
+							SubDirty, SubmodulePaths.Num());
+					}
+				}
+			}
+			else
+			{
+				UE_LOG(LogGitLink, Verbose,
+					TEXT("Cmd_UpdateStatus: skipping cross-repo sweep (last %.1fs ago, throttle %.0fs)"),
+					NowSec - LastSweep, GFullSweepThrottleSec);
+			}
+
+			// Emit a state for every entry in CompositeByPath. (May include submodule files
+			// from the per-submodule status we just merged in.)
 			for (const TPair<FString, FGitLink_CompositeState>& Pair : CompositeByPath)
 			{
 				Result.UpdatedStates.Add(BuildState(Pair.Key, Pair.Value));
 			}
 
-			// Refresh LFS lock state from the remote so we detect files locked by other users.
-			// Only runs in full-scan mode (empty InFiles), which is what the background poll
-			// dispatches every 30 seconds. File-specific status queries (e.g. editor opening a
-			// folder) skip this to avoid a network call on every Content Browser navigation.
-			if (InCtx.Subprocess != nullptr && InCtx.Subprocess->IsValid() && InCtx.Provider.Is_LfsAvailable())
+			// LFS lock refresh — also gated by the throttle. Each submodule typically has its
+			// own LFS endpoint; we poll all repos in parallel and merge into absolute-path-keyed
+			// maps before applying.
+			if (bRunSweep && InCtx.Subprocess != nullptr && InCtx.Subprocess->IsValid() && InCtx.Provider.Is_LfsAvailable())
 			{
-				const TMap<FString, FString> LocalLocks  = InCtx.Subprocess->QueryLfsLocks_Local();
-				const TMap<FString, FString> RemoteLocks = InCtx.Subprocess->QueryLfsLocks_Remote();
+				TMap<FString, FString> RemoteLocksAbs;  // absolute path → owner
+				TSet<FString>          OursAbs;         // absolute paths the LFS server confirms are ours
+
+				auto AbsolutizeFor = [](const FString& InRepoRoot, const FString& InRelPath) -> FString
+				{
+					return Normalize_AbsolutePath(FPaths::Combine(InRepoRoot, InRelPath));
+				};
+
+				// Scope LFS polling to repos that actually use LFS — most submodules in a
+				// typical project (source-only plugins, etc.) don't have LFS configured at
+				// all, and querying them every 30s is the dominant CPU cost. The per-submodule
+				// list was probed at connect time by reading each submodule's .gitattributes.
+				const TArray<FString> LfsSubmodulePaths = InCtx.Provider.Get_LfsSubmodulePaths();
+				TArray<TPair<FString, FString>> RepoPolls;
+				RepoPolls.Reserve(1 + LfsSubmodulePaths.Num());
+				RepoPolls.Add({ InCtx.RepoRootAbsolute, FString() });
+				for (const FString& SubRoot : LfsSubmodulePaths)
+				{ RepoPolls.Add({ SubRoot, SubRoot }); }
+
+				TArray<FGitLink_Subprocess::FLfsLocksSnapshot> Snapshots;
+				Snapshots.SetNum(RepoPolls.Num());
+				ParallelFor_BoundedConcurrency(RepoPolls.Num(), GMaxConcurrentRepoWorkers, [&](int32 Idx)
+				{
+					Snapshots[Idx] = InCtx.Subprocess->QueryLfsLocks_Verified(RepoPolls[Idx].Value);
+				});
+
+				for (int32 Idx = 0; Idx < RepoPolls.Num(); ++Idx)
+				{
+					const FString& RepoRoot = RepoPolls[Idx].Key;
+					const FGitLink_Subprocess::FLfsLocksSnapshot& Snap = Snapshots[Idx];
+					if (Snap.bSuccess)
+					{ SuccessfullyPolledRepos.Add(RepoRoot); }
+					for (const auto& [RelPath, Owner] : Snap.AllLocks)
+					{
+						const FString Abs = AbsolutizeFor(RepoRoot, RelPath);
+						RemoteLocksAbs.Add(Abs, Owner);
+						if (Snap.OursPaths.Contains(RelPath))
+						{ OursAbs.Add(Abs); }
+					}
+				}
 
 				int32 LockChanges = 0;
 
-				for (const auto& [RelPath, LockOwner] : RemoteLocks)
+				for (const auto& [Absolute, LockOwner] : RemoteLocksAbs)
 				{
-					const FString Absolute = Normalize_AbsolutePath(
-						FPaths::Combine(InCtx.RepoRootAbsolute, RelPath));
-
-					const bool bIsOurs = LocalLocks.Contains(RelPath);
+					const bool bIsOurs = OursAbs.Contains(Absolute);
 					const EGitLink_LockState NewLockState = bIsOurs
 						? EGitLink_LockState::Locked
 						: EGitLink_LockState::LockedOther;
@@ -310,22 +429,25 @@ namespace gitlink::cmd
 								Composite.Tree = EGitLink_TreeState::Unmodified;
 							}
 
+							// Preserve / set the bInSubmodule flag from authoritative provider data.
+							Composite.bInSubmodule = InCtx.Provider.Is_InSubmodule(Absolute);
+
 							Result.UpdatedStates.Add(Make_FileState(Absolute, Composite));
 							++LockChanges;
 						}
 					}
 				}
 
-				// Also check for locks that were RELEASED since last poll — files that were
-				// LockedOther (or Locked) in the cache but are no longer in the remote lock set.
-				// Build a set of currently-locked absolute paths for fast lookup.
-				TSet<FString> RemoteLockAbsolutes;
-				RemoteLockAbsolutes.Reserve(RemoteLocks.Num());
-				for (const auto& [RelPath, _] : RemoteLocks)
-				{
-					RemoteLockAbsolutes.Add(Normalize_AbsolutePath(
-						FPaths::Combine(InCtx.RepoRootAbsolute, RelPath)));
-				}
+				// Lock-released detection: a file in our cache marked Locked/LockedOther that
+				// no longer appears in any remote lock set should be reset. Critical: only
+				// consider files in repos whose poll *succeeded*. A failed poll returns an
+				// empty AllLocks which would otherwise be misread as "all locks released",
+				// causing the cache to flip Lock=Locked → NotLocked → Locked on the next
+				// successful poll, breaking Revert UX.
+				TSet<FString> RemoteLockAbsoluteSet;
+				RemoteLockAbsoluteSet.Reserve(RemoteLocksAbs.Num());
+				for (const auto& [Absolute, _] : RemoteLocksAbs)
+				{ RemoteLockAbsoluteSet.Add(Absolute); }
 
 				const TArray<FGitLink_FileStateRef> LockedStates = InCtx.StateCache.Enumerate_FileStates(
 					[](const FGitLink_FileStateRef& InState)
@@ -335,13 +457,20 @@ namespace gitlink::cmd
 					});
 				for (const FGitLink_FileStateRef& Cached : LockedStates)
 				{
-
-					if (RemoteLockAbsolutes.Contains(Cached->GetFilename()))
+					if (RemoteLockAbsoluteSet.Contains(Cached->GetFilename()))
 					{ continue; }
 
-					// Lock was released — update to NotLocked (or Unlockable if not lockable/submodule).
-					const bool bSubmodule = InCtx.Provider.Is_InSubmodule(Cached->GetFilename());
-					const bool bLockable  = !bSubmodule && InCtx.Provider.Is_FileLockable(Cached->GetFilename());
+					// Determine which repo this cached file belongs to and confirm we polled
+					// it successfully this round. If not, skip — we don't have authoritative
+					// data for that repo, so leave the cached lock state alone.
+					const FString OwnerRepo = InCtx.Provider.Is_InSubmodule(Cached->GetFilename())
+						? InCtx.Provider.Get_SubmoduleRoot(Cached->GetFilename())
+						: InCtx.RepoRootAbsolute;
+					if (!SuccessfullyPolledRepos.Contains(OwnerRepo))
+					{ continue; }
+
+					// Lock was genuinely released — update to NotLocked (or Unlockable if extension isn't lockable).
+					const bool bLockable = InCtx.Provider.Is_FileLockable(Cached->GetFilename());
 
 					FGitLink_CompositeState Composite = Cached->_State;
 					Composite.Lock     = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
@@ -354,8 +483,9 @@ namespace gitlink::cmd
 				if (LockChanges > 0)
 				{
 					UE_LOG(LogGitLink, Log,
-						TEXT("Cmd_UpdateStatus: remote lock refresh — %d lock state change(s)"),
-						LockChanges);
+						TEXT("Cmd_UpdateStatus: remote lock refresh across 1 parent + %d LFS submodule(s) of %d total — %d lock state change(s), %d/%d repos polled successfully"),
+						LfsSubmodulePaths.Num(), SubmodulePaths.Num(), LockChanges,
+						SuccessfullyPolledRepos.Num(), RepoPolls.Num());
 				}
 			}
 		}
@@ -393,10 +523,12 @@ namespace gitlink::cmd
 					FGitLink_CompositeState Clean;
 					Clean.File = EGitLink_FileState::Unknown;
 
-					// Submodule files: mark with bInSubmodule so FGitLink_FileState predicates route
-					// them away from the checkout dialog (via IsCheckedOut()=true) while keeping
-					// IsSourceControlled()=true so History stays enabled. BuildState below will
-					// also stamp Lock=Unlockable and carry the bInSubmodule flag forward.
+					// Submodule files: stamp bInSubmodule so command code can route correctly,
+					// and default Tree=Unmodified (we can't see inside the submodule from the
+					// parent's TrackedSet). The next timer-driven full-scan in this command
+					// will run per-submodule Get_Status and stamp the real Tree state — until
+					// then this is the optimistic default. IsSourceControlled() forces true
+					// for submodule files so History stays enabled regardless.
 					const bool bInSubmodule = InCtx.Provider.Is_InSubmodule(Normalized);
 					Clean.bInSubmodule = bInSubmodule;
 

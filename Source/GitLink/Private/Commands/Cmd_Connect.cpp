@@ -148,20 +148,60 @@ namespace gitlink::cmd
 		// classify by path membership: if a remote lock's path is also in the local set, it's
 		// ours (Locked); otherwise it's someone else's (LockedOther). This avoids comparing
 		// usernames, which can differ between git config user.name and the LFS server identity.
+		//
+		// Submodules: each submodule is polled independently against its own LFS endpoint via
+		// the cwd override on FGitLink_Subprocess::QueryLfsLocks_*. Results are merged into a
+		// single absolute-path-keyed map before applying.
 		if (InCtx.Subprocess != nullptr && InCtx.Subprocess->IsValid() && InCtx.Provider.Is_LfsAvailable())
 		{
-			const TMap<FString, FString> LocalLocks  = InCtx.Subprocess->QueryLfsLocks_Local();
-			const TMap<FString, FString> RemoteLocks = InCtx.Subprocess->QueryLfsLocks_Remote();
+			TMap<FString, FString> RemoteLocksAbs;
+			TSet<FString>          OursAbs;
+
+			auto AbsolutizeFor = [](const FString& InRepoRoot, const FString& InRelPath) -> FString
+			{
+				return Normalize_AbsolutePath(FPaths::Combine(InRepoRoot, InRelPath));
+			};
+
+			// Build the (repo_root, cwd_override) list — parent first, then each LFS-using
+			// submodule. Non-LFS submodules (source-only plugins, etc.) are skipped — they
+			// don't have lockable content so polling their LFS endpoints is wasted work.
+			const TArray<FString> LfsSubmodulePaths = InCtx.Provider.Get_LfsSubmodulePaths();
+			TArray<TPair<FString, FString>> RepoPolls;
+			RepoPolls.Reserve(1 + LfsSubmodulePaths.Num());
+			RepoPolls.Add({ InCtx.RepoRootAbsolute, FString() });
+			for (const FString& SubRoot : LfsSubmodulePaths)
+			{ RepoPolls.Add({ SubRoot, SubRoot }); }
+
+			// Each `git lfs locks --verify --json` is a network call; doing 34 of them serially
+			// stalls Connect for ~30s. Run them concurrently — FGitLink_Subprocess::Run is
+			// thread-safe (only reads const _GitBinary/_WorkingDirectory and spawns a subprocess
+			// per call). Merging into the maps happens sequentially after all complete.
+			TArray<FGitLink_Subprocess::FLfsLocksSnapshot> Snapshots;
+			Snapshots.SetNum(RepoPolls.Num());
+			ParallelFor_BoundedConcurrency(RepoPolls.Num(), GMaxConcurrentRepoWorkers, [&](int32 Idx)
+			{
+				Snapshots[Idx] = InCtx.Subprocess->QueryLfsLocks_Verified(RepoPolls[Idx].Value);
+			});
+
+			for (int32 Idx = 0; Idx < RepoPolls.Num(); ++Idx)
+			{
+				const FString& RepoRoot = RepoPolls[Idx].Key;
+				const FGitLink_Subprocess::FLfsLocksSnapshot& Snap = Snapshots[Idx];
+				for (const auto& [RelPath, Owner] : Snap.AllLocks)
+				{
+					const FString Abs = AbsolutizeFor(RepoRoot, RelPath);
+					RemoteLocksAbs.Add(Abs, Owner);
+					if (Snap.OursPaths.Contains(RelPath))
+					{ OursAbs.Add(Abs); }
+				}
+			}
 
 			int32 OurLockCount   = 0;
 			int32 OtherLockCount = 0;
 
-			for (const auto& [RelPath, LockOwner] : RemoteLocks)
+			for (const auto& [Absolute, LockOwner] : RemoteLocksAbs)
 			{
-				const FString Absolute = Normalize_AbsolutePath(
-					FPaths::Combine(InCtx.RepoRootAbsolute, RelPath));
-
-				const bool bIsOurs = LocalLocks.Contains(RelPath);
+				const bool bIsOurs = OursAbs.Contains(Absolute);
 				const EGitLink_LockState LockState = bIsOurs
 					? EGitLink_LockState::Locked
 					: EGitLink_LockState::LockedOther;
@@ -182,10 +222,11 @@ namespace gitlink::cmd
 				if (!bFound)
 				{
 					FGitLink_CompositeState Composite;
-					Composite.File     = EGitLink_FileState::Unknown;
-					Composite.Tree     = EGitLink_TreeState::Unmodified;
-					Composite.Lock     = LockState;
-					Composite.LockUser = LockOwner;
+					Composite.File         = EGitLink_FileState::Unknown;
+					Composite.Tree         = EGitLink_TreeState::Unmodified;
+					Composite.Lock         = LockState;
+					Composite.LockUser     = LockOwner;
+					Composite.bInSubmodule = InCtx.Provider.Is_InSubmodule(Absolute);
 					Result.UpdatedStates.Add(Make_FileState(Absolute, Composite));
 				}
 
@@ -195,8 +236,8 @@ namespace gitlink::cmd
 			if (OurLockCount > 0 || OtherLockCount > 0)
 			{
 				UE_LOG(LogGitLink, Log,
-					TEXT("Cmd_Connect: discovered %d lock(s) held by us, %d by others"),
-					OurLockCount, OtherLockCount);
+					TEXT("Cmd_Connect: discovered %d lock(s) held by us, %d by others (across 1 parent + %d LFS submodule(s))"),
+					OurLockCount, OtherLockCount, LfsSubmodulePaths.Num());
 			}
 		}
 
