@@ -93,10 +93,19 @@ struct FGitLink_CompositeState
 	FString HeadBranch;  ///< Branch that holds a newer version, if Remote != UpToDate.
 
 	/// True when this file lives inside a git submodule relative to the parent repo we're
-	/// providing SCC for. The submodule's own GitLink instance (if any) owns real tracking;
-	/// from the parent's perspective the file is "already checked out" so UE's save pipeline
-	/// proceeds without showing the checkout dialog. History still works because we report
-	/// IsSourceControlled()=true — we just disable all mutation actions (CanCheckIn/Revert/Add).
+	/// providing SCC for. Mostly consumed by command implementations (Cmd_CheckOut,
+	/// Cmd_CheckIn, Cmd_MarkForAdd, Cmd_Delete, Cmd_Revert) via PartitionByRepo, which
+	/// route libgit2 / git-lfs subprocess calls into the inner submodule repo so each
+	/// submodule's own LFS server, remote, and credentials are used.
+	///
+	/// Two state predicates also short-circuit on this flag:
+	///   - IsSourceControlled() returns true unconditionally, so History/Diff stay enabled
+	///     even before per-submodule status has populated the cache entry.
+	///   - IsCurrent() returns true unconditionally, since we don't poll submodule remote
+	///     tracking branches (and Unreal's pre-delete check would otherwise misread the
+	///     default Remote=Unset as "not at latest").
+	/// All other predicates (CanCheckout/CanCheckIn/CanAdd/CanDelete/CanRevert/IsCheckedOut)
+	/// behave identically for outer-repo and submodule files, driven by lock + tree state.
 	bool bInSubmodule = false;
 };
 
