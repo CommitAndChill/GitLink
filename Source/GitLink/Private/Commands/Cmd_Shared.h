@@ -7,6 +7,7 @@
 #include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 
+#include <Async/ParallelFor.h>
 #include <CoreMinimal.h>
 #include <Misc/DateTime.h>
 #include <Misc/Paths.h>
@@ -20,6 +21,45 @@
 
 namespace gitlink::cmd
 {
+	// Maximum number of concurrent expensive cross-repo workers per poll cycle. Caps two
+	// kinds of work that scale linearly with the number of submodules:
+	//
+	//   1. `git lfs locks --verify --json` subprocess spawns (one per LFS-using repo).
+	//      Each is a process startup + HTTPS round-trip + JSON parse. Unbounded
+	//      parallelism saturates all CPU cores during the 30s timer poll.
+	//
+	//   2. Per-submodule libgit2 `Get_Status()` walks (one per submodule). Disk-bound
+	//      and contention-prone when run all-at-once.
+	//
+	// Empirically 8 keeps CPU usage smooth on a 16-thread CPU while still completing
+	// each cycle in well under the 30s background-poll interval.
+	constexpr int32 GMaxConcurrentRepoWorkers = 8;
+
+	// Runs InWork on every index in [0, InCount) with at most InMaxConcurrent invocations
+	// in flight at any one time. Implemented as sequential chunks of ParallelFor — every
+	// chunk fans out to the thread pool, but no more than InMaxConcurrent tasks run
+	// simultaneously. Use this in place of ParallelFor for cross-repo work that spawns
+	// subprocesses or does heavy disk I/O.
+	inline auto ParallelFor_BoundedConcurrency(
+		int32 InCount,
+		int32 InMaxConcurrent,
+		TFunctionRef<void(int32)> InWork) -> void
+	{
+		if (InCount <= 0)
+		{ return; }
+		if (InMaxConcurrent <= 0)
+		{ InMaxConcurrent = InCount; }
+
+		for (int32 ChunkStart = 0; ChunkStart < InCount; ChunkStart += InMaxConcurrent)
+		{
+			const int32 ChunkEnd = FMath::Min(ChunkStart + InMaxConcurrent, InCount);
+			ParallelFor(ChunkEnd - ChunkStart, [&InWork, ChunkStart](int32 LocalIdx)
+			{
+				InWork(ChunkStart + LocalIdx);
+			});
+		}
+	}
+
 	// Make an FGitLink_FileState stamped with the given composite state and current time.
 	inline auto Make_FileState(const FString& InAbsoluteFilename, const FGitLink_CompositeState& InComposite)
 		-> FGitLink_FileStateRef
@@ -80,13 +120,84 @@ namespace gitlink::cmd
 		return Rel;
 	}
 
+	// One bucket of files that all live in the same repo (either the outer repo, or one
+	// specific submodule). Used to route command operations into the correct repo so each
+	// submodule's own libgit2 handle / LFS server / git config is picked up automatically.
+	struct FRepoBatch
+	{
+		// Absolute path to the repo's working tree root, with trailing forward slash.
+		// For the outer repo this matches FCommandContext::RepoRootAbsolute.
+		FString RepoRoot;
+
+		// True when this bucket is a submodule (i.e. RepoRoot != ctx.RepoRootAbsolute).
+		// Cmd_* implementations switch on this to decide whether to use ctx.Repository
+		// (the outer FRepository owned by the provider) or open a fresh FRepository via
+		// Provider::Open_SubmoduleRepositoryFor.
+		bool bIsSubmodule = false;
+
+		// Files in this bucket, mirrored as absolute (editor form) and repo-relative
+		// (libgit2 / git-lfs form) at the same indices.
+		TArray<FString> AbsoluteFiles;
+		TArray<FString> RelativeFiles;
+	};
+
+	// Partition a flat list of editor-supplied file paths into per-repo buckets. The
+	// outer-repo bucket (if any) always comes first in the returned array; submodule
+	// buckets follow in the order their roots were first encountered.
+	inline auto PartitionByRepo(
+		const FCommandContext& InCtx,
+		const TArray<FString>& InFiles) -> TArray<FRepoBatch>
+	{
+		FRepoBatch OuterBatch;
+		OuterBatch.RepoRoot     = InCtx.RepoRootAbsolute;
+		OuterBatch.bIsSubmodule = false;
+
+		TMap<FString, int32> SubBucketIndex;  // submodule root → index into Subs
+		TArray<FRepoBatch> Subs;
+
+		for (const FString& File : InFiles)
+		{
+			const FString SubmoduleRoot = InCtx.Provider.Get_SubmoduleRoot(File);
+			if (SubmoduleRoot.IsEmpty())
+			{
+				OuterBatch.AbsoluteFiles.Add(File);
+				OuterBatch.RelativeFiles.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, File));
+			}
+			else
+			{
+				int32 Idx = SubBucketIndex.FindOrAdd(SubmoduleRoot, INDEX_NONE);
+				if (Idx == INDEX_NONE)
+				{
+					FRepoBatch Sub;
+					Sub.RepoRoot     = SubmoduleRoot;
+					Sub.bIsSubmodule = true;
+					Idx = Subs.Add(MoveTemp(Sub));
+					SubBucketIndex[SubmoduleRoot] = Idx;
+				}
+				Subs[Idx].AbsoluteFiles.Add(File);
+				Subs[Idx].RelativeFiles.Add(ToRepoRelativePath(SubmoduleRoot, File));
+			}
+		}
+
+		TArray<FRepoBatch> Out;
+		Out.Reserve(1 + Subs.Num());
+		if (!OuterBatch.AbsoluteFiles.IsEmpty())
+		{ Out.Add(MoveTemp(OuterBatch)); }
+		Out.Append(MoveTemp(Subs));
+		return Out;
+	}
+
 	// Releases any LFS locks that the current user holds on the given files. Best-effort:
 	// files that aren't locked (or aren't lockable) are silently skipped, so callers can pass
-	// a mixed set without pre-filtering. Returns true if the unlock call succeeded (or was
-	// a no-op); returns false only when the subprocess itself failed.
+	// a mixed set without pre-filtering. Returns true on overall success.
 	//
 	// Used by Cmd_Revert (release after discarding local changes) and Cmd_CheckIn (release
 	// after the commit so the file is free for the next editor to check out).
+	//
+	// Submodule files: partitioned by submodule root and unlocked against each submodule's
+	// own LFS server via the cwd override on FGitLink_Subprocess::RunLfs. The parent and
+	// each submodule typically have different LFS endpoints, so a single batched unlock
+	// against the parent would 404 for submodule paths.
 	//
 	// NOTE: consults InCtx.StateCache to skip files we know aren't Locked by us. Unknown-lock
 	// files are still attempted because the editor cache might be stale.
@@ -100,9 +211,9 @@ namespace gitlink::cmd
 		if (!InCtx.Provider.Is_LfsAvailable())
 		{ return true; }
 
-		TArray<FString> RelativePaths;
-		RelativePaths.Reserve(InAbsoluteFiles.Num());
-
+		// Filter to files that are (a) lockable by extension and (b) plausibly held by us.
+		TArray<FString> Filtered;
+		Filtered.Reserve(InAbsoluteFiles.Num());
 		for (const FString& Absolute : InAbsoluteFiles)
 		{
 			if (!InCtx.Provider.Is_FileLockable(Absolute))
@@ -113,33 +224,47 @@ namespace gitlink::cmd
 			    State->_State.Lock == EGitLink_LockState::LockedOther)
 			{ continue; }  // definitely not ours to release
 
-			RelativePaths.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, Absolute));
+			Filtered.Add(Absolute);
 		}
 
-		if (RelativePaths.IsEmpty())
-		{ return true; }  // nothing to unlock
+		if (Filtered.IsEmpty())
+		{ return true; }
 
-		// No --force flag: callers (Cmd_Revert, Cmd_CheckIn) discard/commit changes
-		// before unlocking, so the working tree should be clean. Omitting --force also
-		// avoids the "admin access required" error that occurs when the LFS server's
-		// lock owner identity (GitHub username) differs from git config user.name.
-		TArray<FString> UnlockArgs;
-		UnlockArgs.Reserve(RelativePaths.Num() + 1);
-		UnlockArgs.Add(TEXT("unlock"));
-		UnlockArgs.Append(RelativePaths);
+		const TArray<FRepoBatch> Batches = PartitionByRepo(InCtx, Filtered);
+		bool bAllOk = true;
 
-		const FGitLink_SubprocessResult Result = InCtx.Subprocess->RunLfs(UnlockArgs);
-		if (!Result.IsSuccess())
+		for (const FRepoBatch& Batch : Batches)
 		{
-			UE_LOG(LogGitLink, Warning,
-				TEXT("Release_LfsLocksBestEffort: git lfs unlock returned: %s"),
-				*Result.Get_CombinedError());
-			return false;
+			if (Batch.RelativeFiles.IsEmpty())
+			{ continue; }
+
+			// No --force flag: callers (Cmd_Revert, Cmd_CheckIn) discard/commit changes
+			// before unlocking, so the working tree should be clean. Omitting --force also
+			// avoids the "admin access required" error that occurs when the LFS server's
+			// lock owner identity (GitHub username) differs from git config user.name.
+			TArray<FString> UnlockArgs;
+			UnlockArgs.Reserve(Batch.RelativeFiles.Num() + 1);
+			UnlockArgs.Add(TEXT("unlock"));
+			UnlockArgs.Append(Batch.RelativeFiles);
+
+			const FString CwdOverride = Batch.bIsSubmodule ? Batch.RepoRoot : FString();
+			const FGitLink_SubprocessResult Result = InCtx.Subprocess->RunLfs(UnlockArgs, CwdOverride);
+			if (!Result.IsSuccess())
+			{
+				UE_LOG(LogGitLink, Warning,
+					TEXT("Release_LfsLocksBestEffort: git lfs unlock (cwd='%s') returned: %s"),
+					*Batch.RepoRoot, *Result.Get_CombinedError());
+				bAllOk = false;
+				continue;
+			}
+
+			UE_LOG(LogGitLink, Log,
+				TEXT("Release_LfsLocksBestEffort: unlocked %d file(s) in %s"),
+				Batch.RelativeFiles.Num(),
+				Batch.bIsSubmodule ? *FString::Printf(TEXT("submodule '%s'"), *Batch.RepoRoot) : TEXT("outer repo"));
 		}
 
-		UE_LOG(LogGitLink, Log,
-			TEXT("Release_LfsLocksBestEffort: unlocked %d file(s)"), RelativePaths.Num());
-		return true;
+		return bAllOk;
 	}
 
 	// ----------------------------------------------------------------------------------------------------------------
