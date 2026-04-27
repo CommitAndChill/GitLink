@@ -242,13 +242,34 @@ auto FGitLink_Subprocess::QueryLfsLocks_Verified(const FString& InCwdOverride) -
 		return Out;
 	}
 
-	const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(Result.StdOut);
-	TSharedPtr<FJsonObject> Root;
-	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
+	Out = Parse_LfsVerifyJson(Result.StdOut);
+
+	if (!Out.bSuccess)
 	{
 		UE_LOG(LogGitLink, Warning,
 			TEXT("QueryLfsLocks_Verified: could not parse JSON output (%d bytes)"),
 			Result.StdOut.Len());
+		return Out;
+	}
+
+	UE_LOG(LogGitLink, Verbose,
+		TEXT("QueryLfsLocks_Verified (cwd='%s'): ours=%d, theirs=%d"),
+		InCwdOverride.IsEmpty() ? *_WorkingDirectory : *InCwdOverride,
+		Out.OursPaths.Num(),
+		Out.AllLocks.Num() - Out.OursPaths.Num());
+
+	return Out;
+}
+
+auto FGitLink_Subprocess::Parse_LfsVerifyJson(const FString& InJsonText) -> FLfsLocksSnapshot
+{
+	FLfsLocksSnapshot Out;
+
+	const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(InJsonText);
+	TSharedPtr<FJsonObject> Root;
+	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
+	{
+		// bSuccess stays false — caller distinguishes "couldn't query" from "no locks".
 		return Out;
 	}
 
@@ -289,12 +310,6 @@ auto FGitLink_Subprocess::QueryLfsLocks_Verified(const FString& InCwdOverride) -
 	Root->TryGetArrayField(TEXT("theirs"), TheirsArr);
 	IngestArray(OursArr,   /*bIsOurs=*/ true);
 	IngestArray(TheirsArr, /*bIsOurs=*/ false);
-
-	UE_LOG(LogGitLink, Verbose,
-		TEXT("QueryLfsLocks_Verified (cwd='%s'): ours=%d, theirs=%d"),
-		InCwdOverride.IsEmpty() ? *_WorkingDirectory : *InCwdOverride,
-		Out.OursPaths.Num(),
-		Out.AllLocks.Num() - Out.OursPaths.Num());
 
 	return Out;
 }
