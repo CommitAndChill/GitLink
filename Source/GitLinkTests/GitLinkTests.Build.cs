@@ -16,6 +16,11 @@ public class GitLinkTests : ModuleRules
 		// expose it to the test module via an include-path rather than promoting it to Public/.
 		PrivateIncludePaths.Add(System.IO.Path.Combine(ModuleDirectory, "..", "GitLink", "Private"));
 
+		// Cmd_Shared.h transitively #includes GitLinkLog.h which lives at the GitLink module
+		// root (alongside Module.cpp). Tests that pull in Cmd_Shared.h to exercise the helpers
+		// (Test_BoundedConcurrency.cpp) need the root on the include path too.
+		PrivateIncludePaths.Add(System.IO.Path.Combine(ModuleDirectory, "..", "GitLink"));
+
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
 			"Core",
