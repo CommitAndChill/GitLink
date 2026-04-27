@@ -20,10 +20,37 @@
 //
 // For newly-added files (not yet in HEAD), DiscardChanges would be a no-op because HEAD has
 // nothing to check out. For those, we additionally call Unstage to drop the index entry.
+//
+// Submodule files: input batch is partitioned by submodule root. Files inside a submodule
+// are reverted against a freshly-opened FRepository for that submodule (Unstage + DiscardChanges).
+// LFS unlock and read-only re-stamping are skipped for submodule files — they were never
+// locked through GitLink (parent's LFS server doesn't manage them) and the read-only flag
+// would block the user's subsequent edits in the submodule.
 // --------------------------------------------------------------------------------------------------------------------
 
 namespace gitlink::cmd
 {
+	namespace
+	{
+		// Performs the unstage + discard-changes pair against the given repo for the given
+		// repo-relative paths. Returns the FResult from DiscardChanges (the dominant operation).
+		auto DiscardForRepo(
+			gitlink::IRepository& InRepo,
+			const TArray<FString>& InRepoRelative) -> FResult
+		{
+			if (InRepoRelative.IsEmpty())
+			{ return FResult::Ok(); }
+
+			const FResult UnstageRes = InRepo.Unstage(InRepoRelative);
+			if (!UnstageRes)
+			{
+				// Not fatal — proceed to DiscardChanges which is the main operation.
+			}
+
+			return InRepo.DiscardChanges(InRepoRelative);
+		}
+	}
+
 	auto Revert(
 		FCommandContext&                  InCtx,
 		const FSourceControlOperationRef& /*InOperation*/,
@@ -76,40 +103,81 @@ namespace gitlink::cmd
 			}
 		}
 
-		// Discard changes for files that have actual modifications.
-		if (!ModifiedFiles.IsEmpty())
+		// Within ModifiedFiles, partition outer vs per-submodule. Each submodule needs its
+		// own FRepository because libgit2 ops are scoped to a single repository handle.
+		TArray<FString> OuterModified;
+		TMap<FString, TArray<FString>> ModifiedBySubmoduleRoot;
+		OuterModified.Reserve(ModifiedFiles.Num());
+
+		for (const FString& File : ModifiedFiles)
 		{
-			// Convert to repo-relative paths — libgit2's git_checkout_head pathspec and
-			// git_reset_default both expect paths relative to the repo root, not absolute.
+			const FString SubmoduleRoot = InCtx.Provider.Get_SubmoduleRoot(File);
+			if (SubmoduleRoot.IsEmpty())
+			{ OuterModified.Add(File); }
+			else
+			{ ModifiedBySubmoduleRoot.FindOrAdd(SubmoduleRoot).Add(File); }
+		}
+
+		// Outer repo: existing path.
+		if (!OuterModified.IsEmpty())
+		{
 			TArray<FString> RelativeModified;
-			RelativeModified.Reserve(ModifiedFiles.Num());
-			for (const FString& Abs : ModifiedFiles)
+			RelativeModified.Reserve(OuterModified.Num());
+			for (const FString& Abs : OuterModified)
 			{
 				RelativeModified.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, Abs));
 			}
 
-			// First drop any index entries (handles newly-added files that have nothing in HEAD).
-			const FResult UnstageRes = InCtx.Repository->Unstage(RelativeModified);
-			if (!UnstageRes)
-			{
-				// Not fatal — proceed to DiscardChanges which is the main operation.
-			}
-
-			const FResult DiscardRes = InCtx.Repository->DiscardChanges(RelativeModified);
+			const FResult DiscardRes = DiscardForRepo(*InCtx.Repository, RelativeModified);
 			if (!DiscardRes)
 			{
 				UE_LOG(LogGitLink, Warning,
-					TEXT("Cmd_Revert: DiscardChanges failed: %s"), *DiscardRes.ErrorMessage);
+					TEXT("Cmd_Revert: outer DiscardChanges failed: %s"), *DiscardRes.ErrorMessage);
 				return FCommandResult::Fail(FText::FromString(DiscardRes.ErrorMessage));
 			}
 		}
 
-		// Release any LFS locks we held on ALL reverted files — both modified and locked-only.
-		// Since we just threw away local changes (or had none), there's no reason to hold the
-		// exclusive edit lock anymore.
+		// Each submodule bucket: open inner repo, discard there.
+		for (const TPair<FString, TArray<FString>>& Pair : ModifiedBySubmoduleRoot)
+		{
+			const FString& SubmoduleRoot = Pair.Key;
+			const TArray<FString>& SubFiles = Pair.Value;
+
+			TUniquePtr<gitlink::FRepository> SubRepo =
+				InCtx.Provider.Open_SubmoduleRepositoryFor(SubFiles[0]);
+			if (!SubRepo.IsValid())
+			{
+				UE_LOG(LogGitLink, Warning,
+					TEXT("Cmd_Revert: could not open submodule repo at '%s' — skipping %d file(s)"),
+					*SubmoduleRoot, SubFiles.Num());
+				continue;
+			}
+
+			TArray<FString> SubRelative;
+			SubRelative.Reserve(SubFiles.Num());
+			for (const FString& Abs : SubFiles)
+			{
+				SubRelative.Add(ToRepoRelativePath(SubmoduleRoot, Abs));
+			}
+
+			const FResult SubDiscardRes = DiscardForRepo(*SubRepo, SubRelative);
+			if (!SubDiscardRes)
+			{
+				UE_LOG(LogGitLink, Warning,
+					TEXT("Cmd_Revert: submodule '%s' DiscardChanges failed: %s"),
+					*SubmoduleRoot, *SubDiscardRes.ErrorMessage);
+				return FCommandResult::Fail(FText::FromString(SubDiscardRes.ErrorMessage));
+			}
+		}
+
+		// Release any LFS locks we held — Release_LfsLocksBestEffort partitions by repo so
+		// outer-repo unlocks hit the parent's LFS server and submodule unlocks hit each
+		// submodule's own server.
 		Release_LfsLocksBestEffort(InCtx, InFiles);
 
-		// Restore read-only flag on reverted files to match the un-checked-out state.
+		// Restore the read-only flag on lockable reverted files to match the un-checked-out
+		// state. Lockability is .gitattributes-driven and uniform across outer and submodule
+		// files, so the flag applies the same way in both.
 		for (const FString& File : InFiles)
 		{
 			if (InCtx.Provider.Is_FileLockable(File) && FPaths::FileExists(File))
@@ -126,11 +194,16 @@ namespace gitlink::cmd
 		Result.UpdatedStates.Reserve(InFiles.Num());
 		for (const FString& File : InFiles)
 		{
+			// Lockability is .gitattributes-driven and uniform across outer-repo and submodule
+			// files (locking is routed to each submodule's own LFS server, but the lockable
+			// extension list is shared). Don't gate on bInSubmodule here.
 			const bool bLockable = InCtx.Provider.Is_FileLockable(File);
+
 			FGitLink_CompositeState Composite;
-			Composite.File = EGitLink_FileState::Unknown;
-			Composite.Tree = EGitLink_TreeState::Unmodified;
-			Composite.Lock = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
+			Composite.File          = EGitLink_FileState::Unknown;
+			Composite.Tree          = EGitLink_TreeState::Unmodified;
+			Composite.Lock          = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
+			Composite.bInSubmodule  = InCtx.Provider.Is_InSubmodule(File);
 			Result.UpdatedStates.Add(Make_FileState(Normalize_AbsolutePath(File), Composite));
 		}
 		return Result;

@@ -16,16 +16,10 @@
 // `git lfs lock <relative path>`, which communicates with the LFS server to record the lock
 // for your user. Other users trying to lock the same file will be denied until you release it.
 //
-// Flow:
-//   1. Verify LFS is available (UsesCheckout() already gated this, but double-check)
-//   2. Filter requested files down to LFS-lockable ones (.uasset / .umap / ... per
-//      .gitattributes). Non-lockable files are silently skipped
-//   3. Convert absolute paths to repo-relative forward-slash paths
-//   4. Run `git lfs lock <paths>` via FGitLink_Subprocess in ONE call (batched)
-//   5. On success, emit Locked states for every file we locked so the content browser
-//      immediately shows the checked-out icon
-//   6. On failure, report the LFS error (typically "already locked by <other user>" or
-//      "no such file") and return a failing FCommandResult
+// Submodule files: input batch is partitioned by repo root. Each submodule has its own LFS
+// endpoint / git config / credentials, so we run `git lfs lock` once per repo with the
+// subprocess cwd set to that repo's root. The submodule's LFS server records the lock
+// under the submodule's own user identity.
 // --------------------------------------------------------------------------------------------------------------------
 
 namespace gitlink::cmd
@@ -51,26 +45,15 @@ namespace gitlink::cmd
 		if (InFiles.IsEmpty())
 		{ return FCommandResult::Ok(); }
 
-		// Filter to lockable files, skipping submodules. Submodule files should never reach
-		// this command: FGitLink_FileState reports IsCheckedOut()=true / CanCheckout()=false
-		// for them, so UE's PromptToCheckoutPackages short-circuits before invoking CheckOut.
-		// This filter is defense-in-depth in case some other code path calls Execute(CheckOut)
-		// with a submodule file explicitly — we silently no-op rather than hitting the parent
-		// repo's LFS server (which has no knowledge of child-repo files).
+		// Filter to lockable files first (extension-based). Non-lockable files are silently
+		// skipped — the editor sometimes asks to lock e.g. .uplugin which isn't covered by
+		// .gitattributes lockable patterns.
 		TArray<FString> LockableAbsolute;
 		LockableAbsolute.Reserve(InFiles.Num());
-
 		for (const FString& File : InFiles)
 		{
-			if (InCtx.Provider.Is_InSubmodule(File))
-			{
-				UE_LOG(LogGitLink, Verbose,
-					TEXT("Cmd_CheckOut: skipping submodule file '%s'"), *File);
-			}
-			else if (InCtx.Provider.Is_FileLockable(File))
-			{
-				LockableAbsolute.Add(File);
-			}
+			if (InCtx.Provider.Is_FileLockable(File))
+			{ LockableAbsolute.Add(File); }
 			else
 			{
 				UE_LOG(LogGitLink, Verbose,
@@ -81,75 +64,79 @@ namespace gitlink::cmd
 		if (LockableAbsolute.IsEmpty())
 		{ return FCommandResult::Ok(); }
 
+		// Partition by repo so each submodule's lock request hits its own LFS server.
+		const TArray<FRepoBatch> Batches = PartitionByRepo(InCtx, LockableAbsolute);
+
 		FCommandResult Result = FCommandResult::Ok();
 		Result.UpdatedStates.Reserve(LockableAbsolute.Num());
 
-		// Build the argument list: "lock <relative paths...>"
-		TArray<FString> LockArgs;
-		LockArgs.Reserve(LockableAbsolute.Num() + 1);
-		LockArgs.Add(TEXT("lock"));
-		for (const FString& Absolute : LockableAbsolute)
+		int32 TotalLocked = 0;
+		for (const FRepoBatch& Batch : Batches)
 		{
-			LockArgs.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, Absolute));
-		}
+			if (Batch.RelativeFiles.IsEmpty())
+			{ continue; }
 
-		const FGitLink_SubprocessResult LockResult = InCtx.Subprocess->RunLfs(LockArgs);
-		if (!LockResult.IsSuccess())
-		{
-			// "Lock exists" means WE already hold the lock — that's the desired end state,
-			// so treat it as success. The editor re-runs checkout after a Cmd_Connect
-			// reconnect, and we don't want to fail just because we're already locked.
-			const FString ErrStr = LockResult.Get_CombinedError();
-			const bool bAlreadyLockedByUs = ErrStr.Contains(TEXT("Lock exists"));
+			TArray<FString> LockArgs;
+			LockArgs.Reserve(Batch.RelativeFiles.Num() + 1);
+			LockArgs.Add(TEXT("lock"));
+			LockArgs.Append(Batch.RelativeFiles);
 
-			if (bAlreadyLockedByUs)
+			const FString CwdOverride = Batch.bIsSubmodule ? Batch.RepoRoot : FString();
+			const FGitLink_SubprocessResult LockResult = InCtx.Subprocess->RunLfs(LockArgs, CwdOverride);
+
+			if (!LockResult.IsSuccess())
 			{
+				// "Lock exists" means WE already hold the lock — that's the desired end state,
+				// so treat it as success. The editor re-runs checkout after a Cmd_Connect
+				// reconnect, and we don't want to fail just because we're already locked.
+				const FString ErrStr = LockResult.Get_CombinedError();
+				const bool bAlreadyLockedByUs = ErrStr.Contains(TEXT("Lock exists"));
+
+				if (!bAlreadyLockedByUs)
+				{
+					const FText Err = FText::Format(
+						LOCTEXT("LockFailed", "GitLink: git lfs lock failed (cwd='{0}'): {1}"),
+						FText::FromString(Batch.RepoRoot),
+						FText::FromString(ErrStr));
+
+					UE_LOG(LogGitLink, Warning, TEXT("%s"), *Err.ToString());
+					return FCommandResult::Fail(Err);
+				}
+
 				UE_LOG(LogGitLink, Log,
-					TEXT("Cmd_CheckOut: file(s) already locked by us, treating as success"));
+					TEXT("Cmd_CheckOut: file(s) in '%s' already locked by us, treating as success"),
+					*Batch.RepoRoot);
 			}
-			else
-			{
-				const FText Err = FText::Format(
-					LOCTEXT("LockFailed", "GitLink: git lfs lock failed: {0}"),
-					FText::FromString(ErrStr));
 
-				UE_LOG(LogGitLink, Warning, TEXT("%s"), *Err.ToString());
-				return FCommandResult::Fail(Err);
+			// Clear read-only and emit predictive Locked state for each file in the bucket.
+			for (int32 Idx = 0; Idx < Batch.AbsoluteFiles.Num(); ++Idx)
+			{
+				const FString& Absolute = Batch.AbsoluteFiles[Idx];
+
+				if (FPaths::FileExists(Absolute))
+				{
+					FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*Absolute, false);
+				}
+
+				FGitLink_FileStateRef Existing = InCtx.StateCache.Find_FileState(Absolute);
+				FGitLink_CompositeState Composite = Existing->_State;
+				Composite.Lock          = EGitLink_LockState::Locked;
+				Composite.LockUser      = InCtx.Provider.Get_UserName();
+				Composite.bInSubmodule  = Batch.bIsSubmodule;
+
+				Result.UpdatedStates.Add(Make_FileState(Normalize_AbsolutePath(Absolute), Composite));
 			}
+
+			TotalLocked += Batch.RelativeFiles.Num();
 		}
 
 		UE_LOG(LogGitLink, Log,
-			TEXT("Cmd_CheckOut: locked %d LFS file(s) as '%s'"),
-			LockableAbsolute.Num(),
-			*InCtx.Provider.Get_UserName());
-
-		// Clear the read-only flag on each locked file so the editor can save to it
-		// without showing the "Make Writable" prompt. This matches Perforce/SVN behavior
-		// where "Check Out" == "make writable + acquire exclusive edit rights".
-		for (const FString& Absolute : LockableAbsolute)
-		{
-			if (FPaths::FileExists(Absolute))
-			{
-				FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*Absolute, false);
-			}
-		}
-
-		// Emit predictive Locked states for every file we just locked. The editor will
-		// re-query status and see IsCheckedOut() == true.
-		for (const FString& Absolute : LockableAbsolute)
-		{
-			// Pull the existing state so we don't clobber File/Tree if the file is dirty.
-			FGitLink_FileStateRef Existing = InCtx.StateCache.Find_FileState(Absolute);
-			FGitLink_CompositeState Composite = Existing->_State;
-			Composite.Lock = EGitLink_LockState::Locked;
-			Composite.LockUser = InCtx.Provider.Get_UserName();
-
-			Result.UpdatedStates.Add(Make_FileState(Normalize_AbsolutePath(Absolute), Composite));
-		}
+			TEXT("Cmd_CheckOut: locked %d LFS file(s) across %d repo(s) as '%s'"),
+			TotalLocked, Batches.Num(), *InCtx.Provider.Get_UserName());
 
 		Result.InfoMessages.Add(FText::Format(
 			LOCTEXT("LockOk", "Locked {0} file(s) via git-lfs."),
-			FText::AsNumber(LockableAbsolute.Num())));
+			FText::AsNumber(TotalLocked)));
 
 		return Result;
 	}
