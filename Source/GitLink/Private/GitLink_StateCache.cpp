@@ -50,14 +50,14 @@ auto FGitLink_StateCache::GetOrCreate_FileState(const FString& InFilename) -> FG
 
 	FGitLink_FileStateRef New = MakeShared<FGitLink_FileState, ESPMode::ThreadSafe>(Key);
 
-	// Stamp submodule entries so the FGitLink_FileState predicates route them past the
-	// checkout dialog (IsCheckedOut=true, CanCheckout=false) from the very first query,
-	// even before GetState() has had a chance to annotate. Closes CLAUDE.md Pitfall #5.
+	// Stamp submodule entries with the bInSubmodule flag so command implementations can
+	// partition the batch by repo. Lock state is left at the default (Unknown) — submodule
+	// files are lockable on the same .gitattributes basis as outer-repo files, and the next
+	// status refresh / lock poll will fill in the real Lock state from the submodule's
+	// own LFS server.
 	if (bIsSubmodule)
 	{
 		New->_State.bInSubmodule = true;
-		New->_State.Lock = EGitLink_LockState::Unlockable;
-		New->_State.Tree = EGitLink_TreeState::Unmodified;
 	}
 
 	_FileStates.Add(Key, New);

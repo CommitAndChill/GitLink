@@ -207,10 +207,8 @@ auto FGitLink_FileState::GetDisplayTooltip() const -> FText
 // --------------------------------------------------------------------------------------------------------------------
 auto FGitLink_FileState::CanCheckIn() const -> bool
 {
-	// Submodule files belong to a child repo — check-in from the parent is nonsensical.
-	if (_State.bInSubmodule)
-	{ return false; }
-
+	// Submodule files: allowed. Cmd_CheckIn partitions the input batch by submodule root
+	// and runs `git commit` against each submodule's repo independently.
 	return _State.File == EGitLink_FileState::Added
 	    || _State.File == EGitLink_FileState::Deleted
 	    || _State.File == EGitLink_FileState::Modified
@@ -219,13 +217,11 @@ auto FGitLink_FileState::CanCheckIn() const -> bool
 
 auto FGitLink_FileState::CanCheckout() const -> bool
 {
-	// Submodule files can't be checked out from the parent repo — the LFS server for the
-	// parent doesn't know about them. The checkout dialog is suppressed via IsCheckedOut()
-	// below, but also gate this predicate so the right-click menu greys the action out.
-	if (_State.bInSubmodule)
-	{ return false; }
-
 	// "Checkout" in Unreal source control == acquire an LFS lock.
+	//
+	// Submodule files: allowed. Cmd_CheckOut routes `git lfs lock` to the submodule's own
+	// LFS server (via the per-call cwd override on the subprocess), so the lock is recorded
+	// on the correct LFS endpoint with the submodule's own credentials.
 	//
 	// Untracked and Ignored files aren't in git yet — you can't lock a file that git-lfs
 	// doesn't know about. The editor would otherwise prompt to check out new files that
@@ -250,13 +246,8 @@ auto FGitLink_FileState::CanCheckout() const -> bool
 
 auto FGitLink_FileState::IsCheckedOut() const -> bool
 {
-	// Submodule files report as "already checked out" so UE5's PromptToCheckoutPackages
-	// short-circuits via its `bAlreadyCheckedOut = IsCheckedOut() || IsAdded()` branch.
-	// This is what actually suppresses the dialog. The file never gets LFS-locked against
-	// the parent repo — the submodule's own SCC instance handles real tracking.
-	if (_State.bInSubmodule)
-	{ return true; }
-
+	// Pure lock-state predicate. Submodule files behave like outer-repo files now —
+	// they're "checked out" iff WE hold the LFS lock on the submodule's server.
 	return _State.Lock == EGitLink_LockState::Locked;
 }
 
@@ -292,6 +283,13 @@ auto FGitLink_FileState::GetOtherBranchHeadModification(
 
 auto FGitLink_FileState::IsCurrent() const -> bool
 {
+	// Submodule files: we don't poll the submodule's remote, so default optimistically.
+	// Without this, Unreal's pre-delete check fails with the misleading "not at latest"
+	// error on every submodule file (because Remote stays at its default Unset, never
+	// reaching UpToDate).
+	if (_State.bInSubmodule)
+	{ return true; }
+
 	return _State.Remote == EGitLink_RemoteState::UpToDate;
 }
 
@@ -347,17 +345,15 @@ auto FGitLink_FileState::IsModified() const -> bool
 
 auto FGitLink_FileState::CanAdd() const -> bool
 {
-	if (_State.bInSubmodule)
-	{ return false; }
-
+	// Submodule files: allowed. Cmd_MarkForAdd routes the stage to the submodule's repo.
 	return _State.Tree == EGitLink_TreeState::Untracked;
 }
 
 auto FGitLink_FileState::CanDelete() const -> bool
 {
-	if (_State.bInSubmodule)
-	{ return false; }
-
+	// Submodule files are deletable from the parent project's SCC. Cmd_Delete partitions
+	// the input batch by submodule root and stages each deletion in the correct inner
+	// repo. The actual `git commit` is left to the user inside the submodule.
 	return IsSourceControlled() && _State.File != EGitLink_FileState::Deleted;
 }
 
@@ -368,12 +364,13 @@ auto FGitLink_FileState::IsConflicted() const -> bool
 
 auto FGitLink_FileState::CanRevert() const -> bool
 {
-	if (_State.bInSubmodule)
-	{ return false; }
-
 	// A file can be reverted if it has local modifications (the usual case) OR if it's
 	// locked by us but not yet modified — reverting a locked-but-clean file releases the
 	// LFS lock, which is the only way to "un-checkout" in a locking-based workflow.
+	//
+	// Submodule files are revertable if modified — Cmd_Revert routes the discard to the
+	// submodule's own repo. The Locked branch is dead for submodule files (they're stamped
+	// Unlockable) but it's harmless to keep the unified condition.
 	return IsModified() || _State.Lock == EGitLink_LockState::Locked;
 }
 
