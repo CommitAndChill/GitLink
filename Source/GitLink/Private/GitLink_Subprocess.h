@@ -43,10 +43,16 @@ public:
 
 	// Runs `git <args>` in the configured working directory. Each element of InArgs is
 	// quoted individually so paths with spaces survive.
-	auto Run(const TArray<FString>& InArgs) -> FGitLink_SubprocessResult;
+	//
+	// InCwdOverride: if non-empty, runs git with that working directory instead of the
+	// configured one. Used to route operations into a submodule's repo so each submodule's
+	// own LFS endpoint / git config / remote is picked up automatically.
+	auto Run(const TArray<FString>& InArgs, const FString& InCwdOverride = FString())
+		-> FGitLink_SubprocessResult;
 
-	// Convenience for `git lfs <subcommand> <args>`.
-	auto RunLfs(const TArray<FString>& InArgs) -> FGitLink_SubprocessResult;
+	// Convenience for `git lfs <subcommand> <args>`. See Run() for InCwdOverride semantics.
+	auto RunLfs(const TArray<FString>& InArgs, const FString& InCwdOverride = FString())
+		-> FGitLink_SubprocessResult;
 
 	// Probe: is git-lfs installed and usable?
 	auto IsLfsAvailable() -> bool;
@@ -57,15 +63,26 @@ public:
 	// can do direct FString::EndsWith comparisons.
 	auto ProbeLockableExtensions(const TArray<FString>& InWildcards) -> TArray<FString>;
 
-	// Queries LFS locks held by the current user via `git lfs locks --local`.
-	// Returns a map of repo-relative paths (forward-slashed) to the lock owner name.
-	// On failure (LFS not available, network error), returns an empty map.
-	auto QueryLfsLocks_Local() -> TMap<FString, FString>;
-
-	// Queries ALL LFS locks (local + remote) via `git lfs locks`. This is a network call
-	// that contacts the LFS server. Returns a map of repo-relative paths to lock owner names.
-	// Used to detect files locked by OTHER users (LockedOther state).
-	auto QueryLfsLocks_Remote() -> TMap<FString, FString>;
+	// Queries LFS locks via `git lfs locks --verify --json`. Network call that contacts
+	// the LFS server and returns separate "ours" and "theirs" buckets — the server-side
+	// truth of which locks the current user holds, regardless of git config user.name.
+	//
+	// AllLocks: every lock the server knows about, keyed by repo-relative forward-slashed
+	// path → owner display name.
+	// OursPaths: subset of AllLocks paths that the LFS server confirms are owned by us.
+	//
+	// On failure (LFS not available, network error), returns an empty snapshot.
+	// InCwdOverride: see Run().
+	struct FLfsLocksSnapshot
+	{
+		// True when git-lfs returned a parseable response (even if no locks exist).
+		// False on subprocess failure / non-zero exit / unparseable JSON. Distinguishes
+		// "no locks" (trustworthy) from "couldn't query" (don't trust empty AllLocks).
+		bool                   bSuccess = false;
+		TMap<FString, FString> AllLocks;
+		TSet<FString>          OursPaths;
+	};
+	auto QueryLfsLocks_Verified(const FString& InCwdOverride = FString()) -> FLfsLocksSnapshot;
 
 	// Runs `git <args>` and writes stdout (binary-safe) to InOutputFile.
 	// Used by FGitLink_Revision::Get to extract file content at a specific commit.
