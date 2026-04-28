@@ -1,5 +1,6 @@
 #include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
+#include "GitLink_LfsHttpClient.h"
 
 #include "GitLink/GitLink_Provider.h"
 #include "GitLinkLog.h"
@@ -141,17 +142,16 @@ namespace gitlink::cmd
 			if (bLockable) { ++LockableCount; }
 		}
 
-		// Stage 3: query LFS locks (both local and remote) so the editor shows accurate lock
-		// state from the start — including files locked by OTHER users.
+		// Stage 3: query LFS locks via /locks/verify so the editor shows accurate lock state
+		// from the start — including files locked by OTHER users.
 		//
-		// We query both --local (our locks, instant) and remote (all locks, network call), then
-		// classify by path membership: if a remote lock's path is also in the local set, it's
-		// ours (Locked); otherwise it's someone else's (LockedOther). This avoids comparing
-		// usernames, which can differ between git config user.name and the LFS server identity.
+		// The verify endpoint returns server-authoritative `ours` / `theirs` partitions, which
+		// avoids comparing usernames (`git config user.name` can differ from the LFS server
+		// identity). Default transport is the in-process HTTP client; subprocess is the
+		// per-repo fallback when endpoint resolution or auth fails.
 		//
-		// Submodules: each submodule is polled independently against its own LFS endpoint via
-		// the cwd override on FGitLink_Subprocess::QueryLfsLocks_*. Results are merged into a
-		// single absolute-path-keyed map before applying.
+		// Submodules: each submodule is polled independently against its own LFS endpoint.
+		// Results are merged into a single absolute-path-keyed map before applying.
 		if (InCtx.Subprocess != nullptr && InCtx.Subprocess->IsValid() && InCtx.Provider.Is_LfsAvailable())
 		{
 			TMap<FString, FString> RemoteLocksAbs;
@@ -178,8 +178,18 @@ namespace gitlink::cmd
 			// per call). Merging into the maps happens sequentially after all complete.
 			TArray<FGitLink_Subprocess::FLfsLocksSnapshot> Snapshots;
 			Snapshots.SetNum(RepoPolls.Num());
+
+			const bool bUseHttp = gitlink::lfs_http::Is_Enabled()
+				&& InCtx.Provider.Get_LfsHttpClient() != nullptr;
+
 			ParallelFor_BoundedConcurrency(RepoPolls.Num(), GMaxConcurrentRepoWorkers, [&](int32 Idx)
 			{
+				const FString& RepoRoot = RepoPolls[Idx].Key;
+				if (bUseHttp && InCtx.Provider.Get_LfsHttpClient()->Has_LfsUrl(RepoRoot))
+				{
+					Snapshots[Idx] = InCtx.Provider.Get_LfsHttpClient()->Request_LocksVerify(RepoRoot);
+					if (Snapshots[Idx].bSuccess) { return; }
+				}
 				Snapshots[Idx] = InCtx.Subprocess->QueryLfsLocks_Verified(RepoPolls[Idx].Value);
 			});
 

@@ -7,6 +7,7 @@
 #include "GitLink_BackgroundPoll.h"
 #include "GitLink_Menu.h"
 #include "GitLink_HookProbe.h"
+#include "GitLink_LfsHttpClient.h"
 #include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 #include "Slate/SGitLink_Settings.h"
@@ -90,6 +91,7 @@ auto FGitLink_Provider::Close() -> void
 	}
 
 	_Repository.Reset();
+	_LfsHttpClient.Reset();
 	_Subprocess.Reset();
 	_bGitRepositoryFound = false;
 	_bLfsAvailable = false;
@@ -156,6 +158,11 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		? Settings->GitBinaryOverride
 		: TEXT("git");
 	_Subprocess = MakeUnique<FGitLink_Subprocess>(GitBinary, _PathToRepositoryRoot);
+
+	// In-process LFS HTTP client — used by the background poll instead of shelling out to
+	// `git lfs locks --verify --json` per repo. Endpoint URLs are resolved per-repo below
+	// once we know the LFS-using submodule set.
+	_LfsHttpClient = MakeUnique<FGitLink_LfsHttpClient>(*_Subprocess);
 
 	// Probe for git-lfs. If unavailable we'll still connect; UsesCheckout just stays off.
 	_bLfsAvailable = _Subprocess->IsLfsAvailable();
@@ -231,6 +238,27 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		for (const FString& SubPath : _SubmodulePaths)
 		{
 			UE_LOG(LogGitLink, Verbose, TEXT("CheckRepositoryStatus: submodule path: '%s'"), *SubPath);
+		}
+
+		// Resolve LFS endpoint URLs for the parent repo + each LFS-using submodule. This is
+		// the only place that shells out for endpoint resolution; per-poll calls hit only the
+		// in-memory cache. A repo without a usable HTTPS LFS URL (e.g. SSH-only remotes) is
+		// silently skipped — Cmd_UpdateStatus / Cmd_Connect fall back to the subprocess path
+		// for those repos at poll time.
+		if (_bLfsAvailable && _LfsHttpClient.IsValid())
+		{
+			int32 ResolvedCount = 0;
+			if (_LfsHttpClient->Resolve_LfsUrlForRepo(_PathToRepositoryRoot))
+			{ ++ResolvedCount; }
+			for (const FString& SubRoot : _LfsSubmodulePaths)
+			{
+				if (_LfsHttpClient->Resolve_LfsUrlForRepo(SubRoot))
+				{ ++ResolvedCount; }
+			}
+
+			UE_LOG(LogGitLink, Log,
+				TEXT("CheckRepositoryStatus: LFS HTTP client resolved %d/%d LFS endpoint(s)"),
+				ResolvedCount, 1 + _LfsSubmodulePaths.Num());
 		}
 	}
 
@@ -650,6 +678,11 @@ auto FGitLink_Provider::Get_Repository() const -> gitlink::FRepository*
 auto FGitLink_Provider::Get_Subprocess() const -> FGitLink_Subprocess*
 {
 	return _Subprocess.Get();
+}
+
+auto FGitLink_Provider::Get_LfsHttpClient() const -> FGitLink_LfsHttpClient*
+{
+	return _LfsHttpClient.Get();
 }
 
 auto FGitLink_Provider::Is_FileLockable(const FString& InAbsolutePath) const -> bool

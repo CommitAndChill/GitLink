@@ -11,6 +11,7 @@ namespace gitlink { class FRepository; }
 class FGitLink_StateCache;
 class FGitLink_CommandDispatcher;
 class FGitLink_Subprocess;
+class FGitLink_LfsHttpClient;
 class FGitLink_BackgroundPoll;
 class FGitLink_Menu;
 
@@ -125,6 +126,11 @@ public:
 	auto Get_Repository() const -> gitlink::FRepository*;
 	auto Get_Subprocess() const -> FGitLink_Subprocess*;
 
+	// In-process LFS HTTP client. Present once a repo is open. Replaces per-poll
+	// `git lfs locks --verify --json` subprocesses for the steady-state background poll —
+	// see GitLink_LfsHttpClient.h for rationale. Gated by the `r.GitLink.LfsHttp` CVar.
+	auto Get_LfsHttpClient() const -> FGitLink_LfsHttpClient*;
+
 	// True when LFS is installed (git lfs version succeeded at connect time) AND the user
 	// has bUseLfsLocking enabled in the plugin settings. Drives UsesCheckout().
 	auto Is_LfsAvailable() const -> bool { return _bLfsAvailable; }
@@ -191,6 +197,7 @@ private:
 	TUniquePtr<FGitLink_StateCache>        _StateCache;
 	TUniquePtr<FGitLink_CommandDispatcher> _Dispatcher;  // constructed empty in Pass B
 	TUniquePtr<FGitLink_Subprocess>        _Subprocess;  // present once a repo is open
+	TUniquePtr<FGitLink_LfsHttpClient>     _LfsHttpClient;  // present once a repo is open
 	TUniquePtr<FGitLink_BackgroundPoll>    _BackgroundPoll;
 	TUniquePtr<FGitLink_Menu>              _Menu;
 

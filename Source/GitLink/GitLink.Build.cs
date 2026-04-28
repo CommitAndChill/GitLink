@@ -33,6 +33,7 @@ public class GitLink : ModuleRules
 			"ToolMenus",
 			"ContentBrowser",
 			"Json",
+			"HTTP",
 		});
 	}
 }
