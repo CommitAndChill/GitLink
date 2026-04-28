@@ -1,5 +1,6 @@
 #include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
+#include "GitLink_LfsHttpClient.h"
 
 #include "GitLink/GitLink_Provider.h"
 #include "GitLink/GitLink_Revision.h"
@@ -367,8 +368,21 @@ namespace gitlink::cmd
 
 				TArray<FGitLink_Subprocess::FLfsLocksSnapshot> Snapshots;
 				Snapshots.SetNum(RepoPolls.Num());
+
+				const bool bUseHttp = gitlink::lfs_http::Is_Enabled()
+					&& InCtx.Provider.Get_LfsHttpClient() != nullptr;
+
 				ParallelFor_BoundedConcurrency(RepoPolls.Num(), GMaxConcurrentRepoWorkers, [&](int32 Idx)
 				{
+					const FString& RepoRoot = RepoPolls[Idx].Key;
+					if (bUseHttp && InCtx.Provider.Get_LfsHttpClient()->Has_LfsUrl(RepoRoot))
+					{
+						Snapshots[Idx] = InCtx.Provider.Get_LfsHttpClient()->Request_LocksVerify(RepoRoot);
+						if (Snapshots[Idx].bSuccess) { return; }
+						// HTTP path failed (transport / 401 / etc.) — fall through to subprocess
+						// for this repo. This keeps a single repo's auth misconfiguration from
+						// poisoning the whole poll cycle.
+					}
 					Snapshots[Idx] = InCtx.Subprocess->QueryLfsLocks_Verified(RepoPolls[Idx].Value);
 				});
 
