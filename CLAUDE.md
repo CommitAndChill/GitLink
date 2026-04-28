@@ -46,7 +46,7 @@ State predicates (`CanCheckout`, `CanRevert`, `IsCheckedOut`, etc.) are on `FGit
 - **CheckIn** = stage + commit + unlock. Respects `KeepCheckedOut` checkbox.
 - **Idempotent checkout**: "Lock exists" is treated as success (file already locked by us).
 - **No `--force` on unlock**: Callers always discard/commit before unlocking, so the working tree is clean. Omitting `--force` avoids the "admin access" error that occurs when the LFS server identity (GitHub username) differs from `git config user.name`.
-- **Remote lock polling**: Every background poll (30s), `Cmd_UpdateStatus` in full-scan mode queries `git lfs locks` (remote) and `git lfs locks --local` to classify all locks as `Locked` (ours) or `LockedOther` (someone else). Uses path membership (local ∩ remote) rather than username comparison to avoid identity mismatches between git config user.name and the LFS server identity. Also detects released locks — files that were Locked/LockedOther in the cache but no longer appear in the remote set are reset to NotLocked.
+- **Remote lock polling**: Every background poll (30s), `Cmd_UpdateStatus` in full-scan mode queries the LFS server's `/locks/verify` endpoint to classify all locks as `Locked` (ours) or `LockedOther` (someone else). Uses the server-authoritative `ours`/`theirs` split rather than username comparison to avoid identity mismatches between `git config user.name` and the LFS server identity. Also detects released locks — files that were Locked/LockedOther in the cache but no longer appear in the response are reset to NotLocked. Default transport is the in-process `FGitLink_LfsHttpClient` (direct HTTPS, pooled keep-alive); set `r.GitLink.LfsHttp 0` to fall back to `git lfs locks --verify --json` per repo. The HTTP path also auto-falls-back per-repo if auth or endpoint resolution fails, so a single misconfigured remote can't poison the poll cycle.
 
 ### CheckIn (Submit)
 
@@ -75,7 +75,7 @@ Two routing primitives:
 | `IsCurrent()` | `true` (optimistic) | We don't poll the submodule's remote tracking branch. Without this, UE's pre-delete check fires the misleading "not at latest" error. |
 | `IsCheckedOut()` / `CanCheckout()` / `CanCheckIn()` / `CanDelete()` / `CanRevert()` / `CanAdd()` | same logic as outer-repo files | Driven purely by lock + tree state. Submodule routing happens in commands. |
 
-**Lock state polling** — `Cmd_UpdateStatus` (full-scan path) and `Cmd_Connect` (Stage 3) iterate `Provider::Get_SubmodulePaths()` and call `QueryLfsLocks_Local`/`QueryLfsLocks_Remote` once per repo with the appropriate cwd. Results are merged into a single absolute-path-keyed map before applying so the existing emit-vs-cache update logic stays repo-agnostic. This is the only way to discover `LockedOther` for files inside a submodule — each submodule's LFS endpoint is separate.
+**Lock state polling** — `Cmd_UpdateStatus` (full-scan path) and `Cmd_Connect` (Stage 3) iterate `Provider::Get_LfsSubmodulePaths()` (the LFS-using subset) and issue one `/locks/verify` per repo. Default transport is `FGitLink_LfsHttpClient::Request_LocksVerify` (in-process HTTPS); fallback is `FGitLink_Subprocess::QueryLfsLocks_Verified` per repo with the appropriate cwd. Results are merged into a single absolute-path-keyed map before applying so the existing emit-vs-cache update logic stays repo-agnostic. This is the only way to discover `LockedOther` for files inside a submodule — each submodule's LFS endpoint is separate.
 
 **Submodule commit hooks** — `Cmd_CheckIn`'s subprocess-fallback-for-hooks path is **not** used for submodule commits. We commit submodules in-process via libgit2 unconditionally (no hook execution). The `bHasPreCommitOrCommitMsgHook` probe in `Cmd_Connect` only runs against the parent. If users have hooks in submodules they care about, they'd need to commit the submodule manually. Acceptable v2 limitation.
 
@@ -99,7 +99,8 @@ Two routing primitives:
 | `GitLink_CommandDispatcher.h/cpp` | FCommandResult, FCommandContext, command registration, sync/async dispatch, changelist threading |
 | `GitLink_StateCache.h/cpp` | Thread-safe state storage with NormalizeKey |
 | `GitLink_State.h/cpp` | FGitLink_FileState predicates (CanCheckout, IsModified, etc.) |
-| `GitLink_Subprocess.h/cpp` | git.exe wrapper for LFS, check-attr, RunToFile, QueryLfsLocks_Local |
+| `GitLink_Subprocess.h/cpp` | git.exe wrapper for LFS, check-attr, RunToFile, QueryLfsLocks_Verified (subprocess fallback) |
+| `GitLink_LfsHttpClient.h/cpp` | In-process LFS `/locks/verify` client (direct HTTPS, replaces per-poll subprocess). CVar: `r.GitLink.LfsHttp` |
 | `GitLink_Revision.h/cpp` | ISourceControlRevision with Get() for diff |
 | `Cmd_Connect.cpp` | Repo open, status scan, LFS lock discovery (local + remote), submodule enumeration |
 | `Cmd_CheckOut.cpp` | LFS lock + writable + idempotent |
