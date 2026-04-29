@@ -6,18 +6,32 @@
 // --------------------------------------------------------------------------------------------------------------------
 // Tests for FGitLink_FileState predicates.
 //
-// v2 contract for submodule files (see GitLink_State.h doc on bInSubmodule):
-//   - IsSourceControlled() short-circuits to true (so History/Diff stay enabled even before
-//     per-submodule status has populated the cache).
+// Current contract for submodule files (see GitLink_State.cpp + Plugins/GitLink/CLAUDE.md
+// "State predicate contract for submodule files"):
+//
+//   - IsSourceControlled() is **Tree-state driven**, identical to outer-repo files. Tracked
+//     submodule files (Tree=Unmodified/Working/Staged) report true; untracked submodule files
+//     (Tree=Untracked/NotInRepo/Ignored) report false. Correct Tree state is supplied at
+//     populate time via Provider::Is_TrackedInSubmodule (per-submodule index built at connect).
+//
+//     This used to short-circuit to true for any submodule file, but that workaround caused
+//     the editor's auto-CheckOut-on-save flow to prompt locking on brand-new files in
+//     submodules — so it was removed. The regression test for that is
+//     SubmoduleUntracked_NotSourceControlled below.
+//
 //   - IsCurrent() short-circuits to true (we don't poll submodule remote tracking; without
 //     this short-circuit, Unreal's pre-delete check fires "not at latest" on every submodule
 //     file because Remote stays at its Unset default).
-//   - All other predicates (CanCheckout / CanCheckIn / CanAdd / CanDelete / CanRevert /
-//     IsCheckedOut) behave identically for submodule and outer-repo files. Routing into
-//     the inner repo happens at the command layer via PartitionByRepo, not in the predicates.
 //
-// These tests lock down both the short-circuits and the "no special-casing" behavior — if a
-// regression sneaks the old v1 short-circuits back in, multiple assertions here will fail.
+//   - CanCheckout / CanCheckIn / CanAdd / CanDelete / CanRevert / IsCheckedOut behave
+//     identically for submodule and outer-repo files. Repo routing happens at the command
+//     layer via PartitionByRepo, not in the predicates. CanCheckout has one extra gate that
+//     applies to BOTH repos: File=Added (staged-as-added but never committed) is not
+//     lockable — locks are only meaningful once the file exists in HEAD.
+//
+// These tests lock down the contract — if a regression flips IsSourceControlled back to
+// force-true for submodules, or removes the File=Added block on CanCheckout, multiple
+// assertions here will fail.
 // --------------------------------------------------------------------------------------------------------------------
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -175,21 +189,23 @@ bool FGitLinkTests_FileState_SubmoduleLocked_IsCheckedOut::RunTest(const FString
 }
 
 // --------------------------------------------------------------------------------------------------------------------
-// REGRESSION: untracked submodule files must NOT be checkable-out.
+// REGRESSION: a brand-new untracked file in a submodule must report NOT source-controlled
+// AND NOT checkable-out. This is the configuration that triggered the "auto-CheckOut on
+// save in submodules" regression — the editor saw IsSourceControlled=true (forced for any
+// submodule file pre-fix) and ran CheckOut on save, prompting users to LFS-lock files that
+// weren't even in git yet.
 //
-// A new file the user just dropped into a submodule directory has Tree=Untracked (set by
-// per-submodule Get_Status() in Cmd_UpdateStatus's full-scan path). CanCheckout's bUntracked
-// guard must reject it — you can't `git lfs lock` a file that isn't tracked. Pre-fix, the
-// optimistic Tree=Unmodified default for unknown submodule files defeated this guard and
-// the editor offered Check Out on brand new files.
+// Both gates are defenses-in-depth and both must hold:
+//   - IsSourceControlled=false stops UE's auto-CheckOut-on-save flow at the gate.
+//   - CanCheckout=false also keeps the right-click "Check Out" menu item disabled.
 // --------------------------------------------------------------------------------------------------------------------
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FGitLinkTests_FileState_SubmoduleUntracked_NotCheckoutable,
-	"GitLink.FileState.SubmoduleUntracked.NotCheckoutable",
+	FGitLinkTests_FileState_SubmoduleUntracked_NotSourceControlledNotCheckoutable,
+	"GitLink.FileState.SubmoduleUntracked.NotSourceControlledNotCheckoutable",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FGitLinkTests_FileState_SubmoduleUntracked_NotCheckoutable::RunTest(const FString& /*Parameters*/)
+bool FGitLinkTests_FileState_SubmoduleUntracked_NotSourceControlledNotCheckoutable::RunTest(const FString& /*Parameters*/)
 {
 	FGitLink_CompositeState S;
 	S.bInSubmodule = true;
@@ -198,11 +214,22 @@ bool FGitLinkTests_FileState_SubmoduleUntracked_NotCheckoutable::RunTest(const F
 
 	const FGitLink_FileState F = MakeState(S);
 
-	TestFalse(TEXT("CanCheckout false — can't LFS-lock an untracked file"),
+	TestFalse(TEXT("IsSourceControlled false — gates UE's auto-CheckOut-on-save flow"),
+		F.IsSourceControlled());
+	TestFalse(TEXT("CanCheckout false — also disables right-click Check Out menu item"),
 		F.CanCheckout());
 	// CanAdd is true for untracked files in either repo — Cmd_MarkForAdd routes to the
 	// submodule's index.
 	TestTrue (TEXT("CanAdd true for untracked submodule file"), F.CanAdd());
+
+	// Re-test for an untracked file with Tree=NotInRepo (the default after Provider::GetState
+	// when Is_TrackedInSubmodule returns false). Same expectations.
+	S.Tree = EGitLink_TreeState::NotInRepo;
+	const FGitLink_FileState F2 = MakeState(S);
+	TestFalse(TEXT("IsSourceControlled false for Tree=NotInRepo submodule file"),
+		F2.IsSourceControlled());
+	TestFalse(TEXT("CanCheckout false for Tree=NotInRepo submodule file"),
+		F2.CanCheckout());
 
 	return true;
 }
@@ -272,34 +299,69 @@ bool FGitLinkTests_FileState_Submodule_IsCurrentEvenWithUnsetRemote::RunTest(con
 }
 
 // --------------------------------------------------------------------------------------------------------------------
-// Submodule short-circuit: IsSourceControlled() must be true even when Tree=NotInRepo.
-// The parent repo's libgit2 status walk doesn't recurse into submodules, so files in a
-// submodule the parent has never seen will hit GetState's optimistic-Unmodified default
-// — but if some path leaves Tree at NotInRepo, History/Diff must still work.
+// REGRESSION: IsSourceControlled() must follow Tree state for BOTH outer-repo and submodule
+// files. There is no "force-true for any submodule file" short-circuit anymore.
+//
+// The previous force-true behavior was the root cause of the "auto-CheckOut on save in
+// submodules" regression: it made every untracked submodule file report as source-controlled,
+// which drove UE's auto-checkout-on-save flow to prompt locking on brand-new files. Now that
+// Provider::GetState stamps the correct Tree state via Is_TrackedInSubmodule (Unmodified for
+// tracked submodule files, NotInRepo for untracked ones), the predicate can be uniform.
+//
+// History/Diff still work for tracked submodule files because their Tree=Unmodified
+// (populated from the per-submodule git index at connect) satisfies this predicate.
 // --------------------------------------------------------------------------------------------------------------------
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FGitLinkTests_FileState_Submodule_IsSourceControlledEvenIfNotInRepo,
-	"GitLink.FileState.Submodule.IsSourceControlledEvenIfNotInRepo",
+	FGitLinkTests_FileState_IsSourceControlled_FollowsTreeState_BothRepos,
+	"GitLink.FileState.IsSourceControlled.FollowsTreeState.BothRepos",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FGitLinkTests_FileState_Submodule_IsSourceControlledEvenIfNotInRepo::RunTest(const FString& /*Parameters*/)
+bool FGitLinkTests_FileState_IsSourceControlled_FollowsTreeState_BothRepos::RunTest(const FString& /*Parameters*/)
 {
-	FGitLink_CompositeState S;
-	S.bInSubmodule = true;
-	S.Tree         = EGitLink_TreeState::NotInRepo;
+	for (const bool bSub : { false, true })
+	{
+		const TCHAR* Tag = bSub ? TEXT("(submodule)") : TEXT("(outer)");
 
-	const FGitLink_FileState F = MakeState(S);
+		// Tracked-clean: source controlled. (Tree=Unmodified is what
+		// Provider::Is_TrackedInSubmodule produces for files in the per-submodule index.)
+		{
+			FGitLink_CompositeState S;
+			S.bInSubmodule = bSub;
+			S.Tree         = EGitLink_TreeState::Unmodified;
+			TestTrue(*FString::Printf(TEXT("IsSourceControlled true when Tree=Unmodified %s"), Tag),
+				MakeState(S).IsSourceControlled());
+		}
 
-	TestTrue(TEXT("IsSourceControlled true for submodule file even if Tree=NotInRepo"),
-		F.IsSourceControlled());
+		// Untracked: NOT source controlled — this is the gate that stops auto-CheckOut on save.
+		{
+			FGitLink_CompositeState S;
+			S.bInSubmodule = bSub;
+			S.Tree         = EGitLink_TreeState::Untracked;
+			TestFalse(*FString::Printf(TEXT("IsSourceControlled false when Tree=Untracked %s"), Tag),
+				MakeState(S).IsSourceControlled());
+		}
 
-	// Outer-repo equivalent must NOT short-circuit.
-	S.bInSubmodule = false;
-	const FGitLink_FileState OuterF = MakeState(S);
-	TestFalse(TEXT("IsSourceControlled false for outer-repo file when Tree=NotInRepo"),
-		OuterF.IsSourceControlled());
+		// NotInRepo: NOT source controlled. Submodule files only end up here when
+		// Is_TrackedInSubmodule returns false (i.e., the file isn't in the per-submodule
+		// index). Pre-fix this returned true for submodule files, which was the regression.
+		{
+			FGitLink_CompositeState S;
+			S.bInSubmodule = bSub;
+			S.Tree         = EGitLink_TreeState::NotInRepo;
+			TestFalse(*FString::Printf(TEXT("IsSourceControlled false when Tree=NotInRepo %s"), Tag),
+				MakeState(S).IsSourceControlled());
+		}
 
+		// Ignored: NOT source controlled.
+		{
+			FGitLink_CompositeState S;
+			S.bInSubmodule = bSub;
+			S.Tree         = EGitLink_TreeState::Ignored;
+			TestFalse(*FString::Printf(TEXT("IsSourceControlled false when Tree=Ignored %s"), Tag),
+				MakeState(S).IsSourceControlled());
+		}
+	}
 	return true;
 }
 
@@ -334,6 +396,47 @@ bool FGitLinkTests_FileState_LockedOther_NotEditable::RunTest(const FString& /*P
 		TestEqual(*FString::Printf(TEXT("Status icon is LockedOther %s"),             Tag),
 			static_cast<uint8>(F.Get_OverallStatus()),
 			static_cast<uint8>(EGitLink_Status::LockedOther));
+	}
+	return true;
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+// REGRESSION: a file that was MarkForAdd'd but never committed (File=Added, Tree=Staged)
+// must NOT be checkable-out, in either repo. LFS locks are only meaningful once the file
+// exists in HEAD; before commit, no other working copy can have a conflicting version.
+//
+// Without this gate, the user lifecycle was: create file → MarkForAdd (auto, on save) →
+// editor's auto-CheckOut path runs again on next save → prompts to lock a file that
+// nobody else can possibly conflict on. Even a manual right-click → Check Out should be
+// blocked here.
+//
+// CanCheckIn / CanRevert remain true (you must be able to commit the addition or undo it).
+// --------------------------------------------------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FGitLinkTests_FileState_FileAdded_NotCheckoutable_BothRepos,
+	"GitLink.FileState.FileAdded.NotCheckoutable.BothRepos",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FGitLinkTests_FileState_FileAdded_NotCheckoutable_BothRepos::RunTest(const FString& /*Parameters*/)
+{
+	for (const bool bSub : { false, true })
+	{
+		FGitLink_CompositeState S;
+		S.bInSubmodule = bSub;
+		S.File         = EGitLink_FileState::Added;
+		S.Tree         = EGitLink_TreeState::Staged;
+		S.Lock         = EGitLink_LockState::NotLocked;
+
+		const FGitLink_FileState F = MakeState(S);
+
+		const TCHAR* Tag = bSub ? TEXT("(submodule)") : TEXT("(outer)");
+		TestFalse(*FString::Printf(TEXT("CanCheckout false for File=Added %s"), Tag),
+			F.CanCheckout());
+		TestTrue (*FString::Printf(TEXT("CanCheckIn true for File=Added %s — needed to commit the addition"), Tag),
+			F.CanCheckIn());
+		TestTrue (*FString::Printf(TEXT("CanRevert true for File=Added %s — needed to undo the addition"), Tag),
+			F.CanRevert());
 	}
 	return true;
 }
