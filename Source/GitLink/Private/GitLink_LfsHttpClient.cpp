@@ -197,6 +197,24 @@ namespace gitlink::lfs_http::detail
 		}
 		return !OutPass.IsEmpty();   // username may legitimately be empty for token-only flows
 	}
+
+	auto Parse_RetryAfterSeconds(const FString& InHeaderValue, int32 InDefaultSec) -> int32
+	{
+		const FString Trimmed = InHeaderValue.TrimStartAndEnd();
+		if (Trimmed.IsEmpty())
+		{ return 0; }
+
+		if (Trimmed.IsNumeric())
+		{
+			const int32 Parsed = FCString::Atoi(*Trimmed);
+			return Parsed > 0 ? Parsed : InDefaultSec;
+		}
+
+		// HTTP-date form (e.g. "Wed, 21 Oct 2026 07:28:00 GMT"). Resolving against wall-clock
+		// time in-process is brittle (clock skew, parsing variants); the default is fine for
+		// our use case since LFS servers in the wild use the integer form.
+		return InDefaultSec;
+	}
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -488,18 +506,8 @@ auto FGitLink_LfsHttpClient::PostVerify_Once(
 		}
 	}
 
-	// Parse Retry-After (integer seconds — HTTP-date form is ignored, fallback used).
-	if (!State->RetryAfter.IsEmpty())
-	{
-		if (State->RetryAfter.IsNumeric())
-		{
-			OutRetryAfterSec = FCString::Atoi(*State->RetryAfter);
-		}
-		else
-		{
-			OutRetryAfterSec = kDefault429BackoffSec;
-		}
-	}
+	OutRetryAfterSec = gitlink::lfs_http::detail::Parse_RetryAfterSeconds(
+		State->RetryAfter, kDefault429BackoffSec);
 
 	if (!State->bSuccess || State->HttpStatus < 200 || State->HttpStatus >= 300)
 	{
