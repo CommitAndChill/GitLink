@@ -2,6 +2,7 @@
 
 #include "GitLink_Module.h"
 #include "GitLink/GitLink_Provider.h"
+#include "GitLink/GitLink_Version.h"
 #include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 
@@ -44,9 +45,19 @@ auto FGitLink_Menu::Register() -> void
 	if (UToolMenus* ToolMenus = UToolMenus::Get())
 	{
 		UToolMenu* SourceControlMenu = ToolMenus->ExtendMenu(TEXT("StatusBar.ToolBar.SourceControl"));
+
+		// Section heading carries the live plugin version. Visible the moment the user opens
+		// the bottom-right Source Control dropdown — no need to dig into Connect to Source
+		// Control settings to confirm what build is loaded. GITLINK_VERSION is the compile-
+		// time constant from GitLink_Version.h; mismatch with the .uplugin descriptor is
+		// surfaced as a Warning at module startup (see GitLink_Module.cpp).
+		const FText SectionHeading = FText::Format(
+			LOCTEXT("GitLinkMenuHeading", "Git (GitLink v{0})"),
+			FText::FromString(GITLINK_VERSION));
+
 		FToolMenuSection& Section = SourceControlMenu->AddSection(
 			TEXT("GitLinkActions"),
-			LOCTEXT("GitLinkMenuHeading", "Git"),
+			SectionHeading,
 			FToolMenuInsert(NAME_None, EToolMenuInsertType::First));
 		AddMenuExtension(Section);
 	}
