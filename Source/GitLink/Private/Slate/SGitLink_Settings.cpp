@@ -2,6 +2,7 @@
 
 #include "GitLink/GitLink_Provider.h"
 #include "GitLink/GitLink_Settings.h"
+#include "GitLink/GitLink_Version.h"
 #include "GitLink_Module.h"
 #include "GitLinkLog.h"
 
@@ -54,6 +55,15 @@ void SGitLink_Settings::Construct(const FArguments& /*InArgs*/)
 		++Row;
 	};
 
+	// Plugin version — `GITLINK_VERSION` (compile-time) + `GITLINK_BUILD_TIMESTAMP` (the
+	// __DATE__/__TIME__ snapshot from when GitLink_Module.cpp was built — refreshes whenever
+	// the plugin is rebuilt, so this row tells you what binary you're actually running, not
+	// what the source tree currently says). Static text — no accessor needed because both
+	// values are baked at compile time.
+	AddRow(LOCTEXT("PluginVersion",   "Plugin version"),
+		FText::Format(LOCTEXT("PluginVersionValue", "{0} (built {1})"),
+			FText::FromString(GITLINK_VERSION),
+			FText::FromString(ANSI_TO_TCHAR(GITLINK_BUILD_TIMESTAMP))));
 	AddRow(LOCTEXT("Backend",         "Backend"),            TAttribute<FText>::CreateSP(this, &SGitLink_Settings::Get_BackendText));
 	AddRow(LOCTEXT("RepositoryRoot",  "Root of the repository"), TAttribute<FText>::CreateSP(this, &SGitLink_Settings::Get_RepositoryRootText));
 	AddRow(LOCTEXT("Branch",          "Current branch"),     TAttribute<FText>::CreateSP(this, &SGitLink_Settings::Get_BranchText));

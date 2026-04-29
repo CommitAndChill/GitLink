@@ -1,5 +1,6 @@
 #include "GitLink_Module.h"
 
+#include "GitLink/GitLink_Version.h"
 #include "GitLinkLog.h"
 
 #include <Features/IModularFeatures.h>
@@ -12,16 +13,28 @@
 
 auto FGitLinkModule::StartupModule() -> void
 {
-	// Log the plugin version from the .uplugin descriptor so it's easy to identify which build
-	// is running when reading logs.
+	// Log compile-time version + build timestamp first — these come from GITLINK_VERSION /
+	// GITLINK_BUILD_TIMESTAMP baked into this TU at compile time, so they pin the version of the
+	// loaded DLL regardless of what the .uplugin descriptor says (the two are bumped in lockstep,
+	// but a stale binary in Binaries/ would otherwise lie). Then log the runtime descriptor
+	// version — a mismatch between the two is the signal "you forgot to rebuild".
+	UE_LOG(LogGitLink, Log,
+		TEXT("GitLink v%s (built %hs): module startup"),
+		GITLINK_VERSION,
+		GITLINK_BUILD_TIMESTAMP);
+
 	const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("GitLink"));
 	if (Plugin.IsValid())
 	{
-		UE_LOG(LogGitLink, Log, TEXT("GitLink v%s: module startup"), *Plugin->GetDescriptor().VersionName);
-	}
-	else
-	{
-		UE_LOG(LogGitLink, Log, TEXT("GitLink: module startup"));
+		const FString DescriptorVersion = Plugin->GetDescriptor().VersionName;
+		if (DescriptorVersion != FString(GITLINK_VERSION))
+		{
+			UE_LOG(LogGitLink, Warning,
+				TEXT("GitLink: .uplugin descriptor reports v%s but compiled binary is v%s — ")
+				TEXT("rebuild the plugin to bring the binary in sync, or bump GITLINK_VERSION ")
+				TEXT("in GitLink_Version.h to match the descriptor."),
+				*DescriptorVersion, GITLINK_VERSION);
+		}
 	}
 
 	// Register the provider as a modular feature so ISourceControlModule can discover it and
