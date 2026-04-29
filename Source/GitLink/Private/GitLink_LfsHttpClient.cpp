@@ -33,8 +33,11 @@ namespace gitlink::lfs_http
 
 namespace
 {
-	constexpr int32  kMaxPaginationPages = 10;
-	constexpr float  kRequestTimeoutSec  = 10.0f;
+	constexpr int32  kMaxPaginationPages       = 10;
+	constexpr float  kRequestTimeoutSec        = 10.0f;
+	constexpr int32  kRateLimitWarnThreshold   = 500;   // log when X-RateLimit-Remaining drops below this
+	constexpr int32  kDefault429BackoffSec     = 60;    // used when Retry-After is missing / non-numeric
+	constexpr int32  kMaxBackoffSec            = 3600;  // cap absurd Retry-After values
 
 	// Strip a trailing slash so we can append "/locks/verify" cleanly.
 	auto StripTrailingSlash(FString InUrl) -> FString
@@ -353,15 +356,32 @@ auto FGitLink_LfsHttpClient::Invalidate_CredentialForHost(const FString& InHostK
 	_AuthByHost.Remove(InHostKey);
 }
 
+auto FGitLink_LfsHttpClient::Is_HostInBackoff(const FString& InHostKey) const -> bool
+{
+	FScopeLock Lock(&_BackoffLock);
+	const double* Until = _BackoffUntilByHost.Find(InHostKey);
+	return Until != nullptr && *Until > FPlatformTime::Seconds();
+}
+
+auto FGitLink_LfsHttpClient::Set_HostBackoff(const FString& InHostKey, int32 InRetryAfterSec) -> void
+{
+	const int32 ClampedSec = FMath::Clamp(InRetryAfterSec, 1, kMaxBackoffSec);
+	const double Until     = FPlatformTime::Seconds() + static_cast<double>(ClampedSec);
+	FScopeLock Lock(&_BackoffLock);
+	_BackoffUntilByHost.Add(InHostKey, Until);
+}
+
 // --------------------------------------------------------------------------------------------------------------------
 
 auto FGitLink_LfsHttpClient::PostVerify_Once(
 	const FResolvedEndpoint& InEndpoint,
 	const FString&           InAuthHeader,
 	const FString&           InCursor,
-	int32&                   OutHttpStatus) -> FGitLink_Subprocess::FLfsLocksSnapshot
+	int32&                   OutHttpStatus,
+	int32&                   OutRetryAfterSec) -> FGitLink_Subprocess::FLfsLocksSnapshot
 {
-	OutHttpStatus = -1;
+	OutHttpStatus    = -1;
+	OutRetryAfterSec = 0;
 	FGitLink_Subprocess::FLfsLocksSnapshot Out;
 
 	// Build request body. Per the LFS spec: `ref` is optional; `cursor` is supplied for
@@ -392,10 +412,12 @@ auto FGitLink_LfsHttpClient::PostVerify_Once(
 	// pool exactly once, by the destructor.
 	struct FCompletion
 	{
-		FEvent*  Done       = nullptr;
+		FEvent*  Done             = nullptr;
 		FString  ResponseBody;
-		int32    HttpStatus = -1;
-		bool     bSuccess   = false;
+		FString  RateLimitRemaining;   // X-RateLimit-Remaining header (empty if absent)
+		FString  RetryAfter;            // Retry-After header (empty if absent)
+		int32    HttpStatus       = -1;
+		bool     bSuccess         = false;
 
 		~FCompletion()
 		{
@@ -420,8 +442,10 @@ auto FGitLink_LfsHttpClient::PostVerify_Once(
 			State->bSuccess = bInSuccess && InResp.IsValid();
 			if (InResp.IsValid())
 			{
-				State->HttpStatus   = InResp->GetResponseCode();
-				State->ResponseBody = InResp->GetContentAsString();
+				State->HttpStatus         = InResp->GetResponseCode();
+				State->ResponseBody       = InResp->GetContentAsString();
+				State->RateLimitRemaining = InResp->GetHeader(TEXT("X-RateLimit-Remaining"));
+				State->RetryAfter         = InResp->GetHeader(TEXT("Retry-After"));
 			}
 			State->Done->Trigger();
 		});
@@ -446,6 +470,36 @@ auto FGitLink_LfsHttpClient::PostVerify_Once(
 	}
 
 	OutHttpStatus = State->HttpStatus;
+
+	// Surface low rate-limit budget once per session so a noisy editor + many submodules
+	// can't exhaust the LFS quota silently. GitHub's LFS bucket is 3000/min authenticated
+	// (separate from the 5000/hr REST quota), so we should virtually never see this — if
+	// we do, it's a real signal something is misconfigured.
+	if (!State->RateLimitRemaining.IsEmpty() && State->RateLimitRemaining.IsNumeric())
+	{
+		const int32 Remaining = FCString::Atoi(*State->RateLimitRemaining);
+		static FThreadSafeBool bWarnedLowBudget = false;
+		if (Remaining < kRateLimitWarnThreshold && !bWarnedLowBudget.AtomicSet(true))
+		{
+			UE_LOG(LogGitLink, Warning,
+				TEXT("LfsHttpClient: LFS rate-limit budget low — %d remaining (host '%s'). ")
+				TEXT("If this persists, set r.GitLink.LfsHttp 0 to fall back to subprocess polling."),
+				Remaining, *InEndpoint.HostKey);
+		}
+	}
+
+	// Parse Retry-After (integer seconds — HTTP-date form is ignored, fallback used).
+	if (!State->RetryAfter.IsEmpty())
+	{
+		if (State->RetryAfter.IsNumeric())
+		{
+			OutRetryAfterSec = FCString::Atoi(*State->RetryAfter);
+		}
+		else
+		{
+			OutRetryAfterSec = kDefault429BackoffSec;
+		}
+	}
 
 	if (!State->bSuccess || State->HttpStatus < 200 || State->HttpStatus >= 300)
 	{
@@ -480,6 +534,16 @@ auto FGitLink_LfsHttpClient::Request_LocksVerify(const FString& InRepoRoot)
 		Endpoint = *Found;
 	}
 
+	// Server-driven backoff — honor a recent 429 by failing fast so the per-repo subprocess
+	// fallback kicks in instead of pounding a host that's already told us to back off.
+	if (Is_HostInBackoff(Endpoint.HostKey))
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("LfsHttpClient: skipping '%s' — host in 429 backoff, caller should fall back"),
+			*Endpoint.HostKey);
+		return Out;
+	}
+
 	FString AuthHeader = Get_BasicAuthHeader(Endpoint.HostKey);
 	if (AuthHeader.IsEmpty())
 	{
@@ -497,9 +561,20 @@ auto FGitLink_LfsHttpClient::Request_LocksVerify(const FString& InRepoRoot)
 
 	while (PagesFetched < kMaxPaginationPages)
 	{
-		int32 HttpStatus = -1;
+		int32 HttpStatus     = -1;
+		int32 RetryAfterSec  = 0;
 		FGitLink_Subprocess::FLfsLocksSnapshot Page = PostVerify_Once(
-			Endpoint, AuthHeader, Cursor, HttpStatus);
+			Endpoint, AuthHeader, Cursor, HttpStatus, RetryAfterSec);
+
+		if (HttpStatus == 429)
+		{
+			const int32 BackoffSec = RetryAfterSec > 0 ? RetryAfterSec : kDefault429BackoffSec;
+			Set_HostBackoff(Endpoint.HostKey, BackoffSec);
+			UE_LOG(LogGitLink, Warning,
+				TEXT("LfsHttpClient: host '%s' returned 429 — backing off %d s"),
+				*Endpoint.HostKey, BackoffSec);
+			break;
+		}
 
 		if (HttpStatus == 401 && !bRetriedAuth)
 		{

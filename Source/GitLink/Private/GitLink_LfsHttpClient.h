@@ -104,11 +104,20 @@ private:
 
 	// Issues a single POST to LfsUrl/locks/verify, parsing the response. Returns the parsed
 	// snapshot on 2xx. OutHttpStatus receives the HTTP status code (-1 on transport failure).
+	// OutRetryAfterSec receives the response's Retry-After header (0 if absent).
 	auto PostVerify_Once(
 		const FResolvedEndpoint& InEndpoint,
 		const FString&           InAuthHeader,
 		const FString&           InCursor,
-		int32&                   OutHttpStatus) -> FGitLink_Subprocess::FLfsLocksSnapshot;
+		int32&                   OutHttpStatus,
+		int32&                   OutRetryAfterSec) -> FGitLink_Subprocess::FLfsLocksSnapshot;
+
+	// Returns true if a recent 429 told us to back off this host until some future time.
+	// Used to short-circuit Request_LocksVerify before issuing a doomed HTTP call.
+	auto Is_HostInBackoff(const FString& InHostKey) const -> bool;
+
+	// Records that the server told us to back off this host for InRetryAfterSec seconds.
+	auto Set_HostBackoff(const FString& InHostKey, int32 InRetryAfterSec) -> void;
 
 	FGitLink_Subprocess& _Subprocess;
 
@@ -117,4 +126,10 @@ private:
 
 	mutable FCriticalSection            _CredentialsLock;
 	TMap<FString, FString>              _AuthByHost;        // host key → "Basic <b64>"
+
+	// Per-host backoff deadlines (FPlatformTime::Seconds when we may try again). Populated
+	// from Retry-After on a 429 response and consulted on every Request_LocksVerify call.
+	// Bounded growth: one entry per LFS host (typically 1–2 in practice).
+	mutable FCriticalSection            _BackoffLock;
+	TMap<FString, double>               _BackoffUntilByHost;
 };
