@@ -169,6 +169,14 @@ public:
 	// a network round-trip per poll for nothing. Probed once at connect time.
 	auto Get_LfsSubmodulePaths() const -> TArray<FString> { return _LfsSubmodulePaths; }
 
+	// True when the given absolute path is a tracked file inside one of the submodules.
+	// Populated at connect time by enumerating each submodule's git index. Used by GetState
+	// to decide whether a brand-new submodule file query should default to Tree=Unmodified
+	// (tracked file the parent's status walk can't see) or Tree=NotInRepo (untracked file —
+	// must NOT be offered for checkout, fixes the "new file in submodule prompts to lock"
+	// bug). Case-insensitive lookup.
+	auto Is_TrackedInSubmodule(const FString& InAbsolutePath) const -> bool;
+
 	auto Get_PathToRepositoryRoot() const -> const FString& { return _PathToRepositoryRoot; }
 	auto Get_UserName()             const -> const FString& { return _UserName; }
 	auto Get_UserEmail()            const -> const FString& { return _UserEmail; }
@@ -217,6 +225,15 @@ private:
 	// Subset of _SubmodulePaths whose .gitattributes mentions LFS (filter=lfs or lockable).
 	// Populated at connect time. Used to scope per-poll LFS lock queries.
 	TArray<FString> _LfsSubmodulePaths;
+
+	// Per-submodule tracked-file sets, keyed by absolute submodule root (with trailing /).
+	// Each value is the set of repo-relative tracked paths in that submodule's git index,
+	// stored lower-cased for case-insensitive lookup on Windows. Populated at connect time
+	// alongside _SubmodulePaths and consumed by Is_TrackedInSubmodule + GetState. Empty
+	// for repos without submodules. Refreshed only on full reconnect — adding a new file
+	// to a submodule's index between connects won't be reflected here, but the next
+	// UpdateStatus full sweep stamps the real Tree state regardless.
+	TMap<FString, TSet<FString>> _SubmoduleTrackedSets;
 
 	FString _PathToRepositoryRoot;  // resolved working tree root
 	FString _UserName;

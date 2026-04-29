@@ -283,27 +283,49 @@ namespace gitlink::cmd
 		}
 
 		// Release LFS locks (per-repo via Release_LfsLocksBestEffort) unless the user
-		// checked "Keep Files Checked Out".
+		// checked "Keep Files Checked Out". The outcome lets us avoid stamping NotLocked
+		// on files whose unlock failed — same rationale as Cmd_Revert: a silent failure
+		// would flip the cache to NotLocked while the server lock persists, leaving the
+		// file permanently stuck.
 		const bool bKeepCheckedOut = CheckInOp->GetKeepCheckedOut();
+		FLfsUnlockOutcome UnlockOutcome;
 		if (!bKeepCheckedOut)
 		{
-			Release_LfsLocksBestEffort(InCtx, AllAbsolute);
+			UnlockOutcome = Release_LfsLocksBestEffort(InCtx, AllAbsolute);
 		}
+		else
+		{
+			// "Keep Checked Out" — every file should remain Locked. Treat all as released
+			// from a stamping perspective; the per-file Lock=Locked decision below handles
+			// the actual cache value.
+			for (const FString& File : AllAbsolute)
+			{ UnlockOutcome.Released.Add(File); }
+		}
+		const TSet<FString> FailedSet(UnlockOutcome.FailedPaths);
 
 		// Build predictive Unmodified states for the committed files.
 		FCommandResult Result = FCommandResult::Ok();
 		Result.UpdatedStates.Reserve(AllAbsolute.Num());
 		for (const FString& File : AllAbsolute)
 		{
-			const bool bLockable    = InCtx.Provider.Is_FileLockable(File);
-			const bool bSubmodule   = InCtx.Provider.Is_InSubmodule(File);
+			const bool bLockable     = InCtx.Provider.Is_FileLockable(File);
+			const bool bSubmodule    = InCtx.Provider.Is_InSubmodule(File);
+			const bool bUnlockFailed = FailedSet.Contains(File);
 
 			FGitLink_CompositeState Composite;
 			Composite.File          = EGitLink_FileState::Unknown;
 			Composite.Tree          = EGitLink_TreeState::Unmodified;
 			Composite.bInSubmodule  = bSubmodule;
 
-			if (bKeepCheckedOut && bLockable)
+			if (bUnlockFailed)
+			{
+				// Server still holds the lock — preserve the cached Lock state so the
+				// editor keeps the file visibly checked out and the user can retry.
+				const FGitLink_FileStateRef Existing = InCtx.StateCache.Find_FileState(File);
+				Composite.Lock     = Existing->_State.Lock;
+				Composite.LockUser = Existing->_State.LockUser;
+			}
+			else if (bKeepCheckedOut && bLockable)
 			{
 				Composite.Lock = EGitLink_LockState::Locked;
 			}
@@ -313,6 +335,33 @@ namespace gitlink::cmd
 			}
 
 			Result.UpdatedStates.Add(Make_FileState(Normalize_AbsolutePath(File), Composite));
+		}
+
+		// Surface unlock failures as a non-fatal error on the result. The commit itself
+		// succeeded, but the post-commit unlock did not. Without this, the failure went
+		// to a Warning log only and the user never knew the lock was still held.
+		if (!UnlockOutcome.FailedPaths.IsEmpty())
+		{
+			Result.bOk = false;
+
+			FString Joined;
+			for (int32 Idx = 0; Idx < UnlockOutcome.ErrorMessages.Num(); ++Idx)
+			{
+				if (Idx > 0) { Joined += TEXT("\n"); }
+				Joined += UnlockOutcome.ErrorMessages[Idx];
+			}
+			constexpr int32 MaxLen = 1024;
+			if (Joined.Len() > MaxLen)
+			{ Joined = Joined.Left(MaxLen) + TEXT(" ..."); }
+
+			Result.ErrorMessages.Add(FText::Format(
+				LOCTEXT("CheckInUnlockFailed",
+					"Commit succeeded, but failed to release the LFS lock on {0} file(s). "
+					"You still hold these locks on the server. "
+					"Common cause: the LFS server's lock owner identity differs from `git config user.name`. "
+					"Details: {1}"),
+				FText::AsNumber(UnlockOutcome.FailedPaths.Num()),
+				FText::FromString(Joined)));
 		}
 
 		const int32 RepoCount = Batches.Num();

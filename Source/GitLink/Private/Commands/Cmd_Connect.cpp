@@ -142,6 +142,15 @@ namespace gitlink::cmd
 			if (bLockable) { ++LockableCount; }
 		}
 
+		// NOTE: tracked-clean submodule files are intentionally NOT pre-populated here.
+		// Provider::GetState consults Provider::Is_TrackedInSubmodule (built at connect
+		// time from each submodule's git index) and stamps Tree=Unmodified on demand
+		// for tracked submodule files, or leaves Tree=NotInRepo for brand-new files —
+		// which is what blocks the misleading "check out?" prompt for new files in
+		// submodules. Pre-populating here would risk path-casing key mismatches with
+		// editor queries, which the on-demand path avoids by reusing the editor's
+		// exact normalized path.
+
 		// Stage 3: query LFS locks via /locks/verify so the editor shows accurate lock state
 		// from the start — including files locked by OTHER users.
 		//
