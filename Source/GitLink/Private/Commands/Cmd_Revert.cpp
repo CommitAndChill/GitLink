@@ -172,14 +172,22 @@ namespace gitlink::cmd
 
 		// Release any LFS locks we held — Release_LfsLocksBestEffort partitions by repo so
 		// outer-repo unlocks hit the parent's LFS server and submodule unlocks hit each
-		// submodule's own server.
-		Release_LfsLocksBestEffort(InCtx, InFiles);
+		// submodule's own server. The outcome split tells us which files genuinely freed
+		// vs which the server still holds locks on (typical cause: lock owner identity on
+		// the LFS server differs from local `git config user.name`, so the unlock is
+		// rejected). We intentionally do NOT stamp Lock=NotLocked on failed files —
+		// previously the cache flipped to NotLocked while the server lock persisted,
+		// hiding the failure and leaving the file permanently stuck.
+		const FLfsUnlockOutcome UnlockOutcome = Release_LfsLocksBestEffort(InCtx, InFiles);
+		const TSet<FString> FailedSet(UnlockOutcome.FailedPaths);
 
 		// Restore the read-only flag on lockable reverted files to match the un-checked-out
-		// state. Lockability is .gitattributes-driven and uniform across outer and submodule
-		// files, so the flag applies the same way in both.
+		// state. Skip files whose unlock failed — leaving them writable matches reality
+		// (user still holds the lock conceptually) and avoids masking the failure.
 		for (const FString& File : InFiles)
 		{
+			if (FailedSet.Contains(File))
+			{ continue; }
 			if (InCtx.Provider.Is_FileLockable(File) && FPaths::FileExists(File))
 			{
 				FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*File, true);
@@ -187,22 +195,64 @@ namespace gitlink::cmd
 		}
 
 		UE_LOG(LogGitLink, Log,
-			TEXT("Cmd_Revert: reverted %d modified, %d locked-only file(s)"),
-			ModifiedFiles.Num(), LockedOnlyFiles.Num());
+			TEXT("Cmd_Revert: reverted %d modified, %d locked-only file(s); unlock failed for %d file(s)"),
+			ModifiedFiles.Num(), LockedOnlyFiles.Num(), UnlockOutcome.FailedPaths.Num());
 
 		FCommandResult Result = FCommandResult::Ok();
+
+		if (!UnlockOutcome.FailedPaths.IsEmpty())
+		{
+			Result.bOk = false;
+
+			// Aggregate every batch error into a single user-visible message. Truncate at a
+			// sane length so the toast / dialog stays readable when many batches fail.
+			FString Joined;
+			for (int32 Idx = 0; Idx < UnlockOutcome.ErrorMessages.Num(); ++Idx)
+			{
+				if (Idx > 0) { Joined += TEXT("\n"); }
+				Joined += UnlockOutcome.ErrorMessages[Idx];
+			}
+			constexpr int32 MaxLen = 1024;
+			if (Joined.Len() > MaxLen)
+			{ Joined = Joined.Left(MaxLen) + TEXT(" ..."); }
+
+			Result.ErrorMessages.Add(FText::Format(
+				LOCTEXT("RevertUnlockFailed",
+					"Reverted local changes, but failed to release the LFS lock on {0} file(s). "
+					"You still hold these locks on the server — fix the underlying error and try again. "
+					"Common cause: the LFS server's lock owner identity differs from `git config user.name`. "
+					"Details: {1}"),
+				FText::AsNumber(UnlockOutcome.FailedPaths.Num()),
+				FText::FromString(Joined)));
+		}
+
 		Result.UpdatedStates.Reserve(InFiles.Num());
 		for (const FString& File : InFiles)
 		{
 			// Lockability is .gitattributes-driven and uniform across outer-repo and submodule
 			// files (locking is routed to each submodule's own LFS server, but the lockable
 			// extension list is shared). Don't gate on bInSubmodule here.
-			const bool bLockable = InCtx.Provider.Is_FileLockable(File);
+			const bool bLockable     = InCtx.Provider.Is_FileLockable(File);
+			const bool bUnlockFailed = FailedSet.Contains(File);
 
 			FGitLink_CompositeState Composite;
 			Composite.File          = EGitLink_FileState::Unknown;
 			Composite.Tree          = EGitLink_TreeState::Unmodified;
-			Composite.Lock          = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
+
+			// On unlock failure, preserve the cached Lock state (typically Locked) so the
+			// editor still shows the file as checked out and the user understands the
+			// revert wasn't a complete no-op state-wise. On success, fall back to the
+			// lockability default.
+			if (bUnlockFailed)
+			{
+				const FGitLink_FileStateRef Existing = InCtx.StateCache.Find_FileState(File);
+				Composite.Lock     = Existing->_State.Lock;
+				Composite.LockUser = Existing->_State.LockUser;
+			}
+			else
+			{
+				Composite.Lock = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
+			}
 			Composite.bInSubmodule  = InCtx.Provider.Is_InSubmodule(File);
 			Result.UpdatedStates.Add(Make_FileState(Normalize_AbsolutePath(File), Composite));
 		}

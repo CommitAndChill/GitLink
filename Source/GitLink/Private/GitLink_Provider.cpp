@@ -28,6 +28,7 @@ namespace gitlink::op
 {
 	auto Get_DefaultSignature(gitlink::FRepository& InRepo) -> gitlink::FSignature;
 	auto Enumerate_SubmodulePaths(gitlink::FRepository& InRepo) -> TArray<FString>;
+	auto Enumerate_TrackedFiles(gitlink::FRepository& InRepo) -> TArray<FString>;
 }
 
 #include <Misc/Paths.h>
@@ -201,39 +202,66 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		// GetOrCreate_FileState is called before GetState() has had a chance to annotate.
 		_StateCache->Set_SubmodulePaths(_SubmodulePaths);
 
-		// Probe each submodule's .gitattributes to identify which ones actually use LFS.
-		// We use this list to scope per-poll LFS lock queries — most submodules in a typical
-		// project (source-only plugins, tooling, etc.) don't have LFS at all, and querying
-		// 30+ remotes per 30-second poll cycle when only a handful actually have lockable
-		// content is the dominant CPU cost in the editor.
+		// Enumerate each submodule's tracked-files index. Used by GetState to distinguish
+		// "tracked submodule file the parent's status walk can't see" (default to Unmodified)
+		// from "untracked file in a submodule" (must default to NotInRepo so CanCheckout
+		// returns false). Without this distinction, brand-new files inside submodules
+		// trigger the editor's "check out?" prompt because the optimistic Unmodified
+		// default lets CanCheckout pass.
 		//
-		// Cheap probe: read up to 8 KB from <submodule>/.gitattributes (top-level only — the
-		// vast majority of LFS configurations live there) and look for `filter=lfs` or
-		// `lockable`. False positives are harmless (just an extra remote poll), false
-		// negatives mean a submodule's locks won't appear until we manually refresh.
-		_LfsSubmodulePaths.Reset();
-		for (const FString& SubPath : _SubmodulePaths)
+		// Lower-case the keys for case-insensitive lookup on Windows. The set stores
+		// repo-relative paths (forward-slash form), matching what Enumerate_TrackedFiles
+		// returns from libgit2.
+		_SubmoduleTrackedSets.Reset();
+		_SubmoduleTrackedSets.Reserve(_SubmodulePaths.Num());
+		int32 TotalSubmoduleTracked = 0;
+		for (const FString& SubRoot : _SubmodulePaths)
 		{
-			const FString GitAttrPath = SubPath + TEXT(".gitattributes");
-			FString GitAttrContent;
-			if (!FFileHelper::LoadFileToString(GitAttrContent, *GitAttrPath))
-			{ continue; }
-
-			const bool bUsesLfs =
-				   GitAttrContent.Contains(TEXT("filter=lfs"), ESearchCase::IgnoreCase)
-				|| GitAttrContent.Contains(TEXT("lockable"),  ESearchCase::IgnoreCase);
-
-			if (bUsesLfs)
+			gitlink::FOpenParams SubParams;
+			SubParams.Path = SubRoot;
+			TUniquePtr<gitlink::FRepository> SubRepo = gitlink::FRepository::Open(SubParams);
+			if (!SubRepo.IsValid())
 			{
-				_LfsSubmodulePaths.Add(SubPath);
 				UE_LOG(LogGitLink, Verbose,
-					TEXT("CheckRepositoryStatus: LFS submodule: '%s'"), *SubPath);
+					TEXT("CheckRepositoryStatus: could not open submodule '%s' for tracked-set enumeration: %s"),
+					*SubRoot, *gitlink::FRepository::Get_LastOpenError());
+				continue;
 			}
+
+			const TArray<FString> SubTracked = gitlink::op::Enumerate_TrackedFiles(*SubRepo);
+			TSet<FString>& SetRef = _SubmoduleTrackedSets.Add(SubRoot);
+			SetRef.Reserve(SubTracked.Num());
+			for (const FString& RelPath : SubTracked)
+			{ SetRef.Add(RelPath.ToLower()); }
+			TotalSubmoduleTracked += SubTracked.Num();
 		}
 
 		UE_LOG(LogGitLink, Log,
-			TEXT("CheckRepositoryStatus: %d/%d submodules use LFS (others skipped during lock polls)"),
-			_LfsSubmodulePaths.Num(), _SubmodulePaths.Num());
+			TEXT("CheckRepositoryStatus: indexed %d tracked file(s) across %d submodule(s) for fast TrackedInSubmodule lookups"),
+			TotalSubmoduleTracked, _SubmoduleTrackedSets.Num());
+
+		// Treat every submodule as a candidate LFS repo. Previously we tried to filter by
+		// scanning each submodule's top-level .gitattributes for `filter=lfs` / `lockable`,
+		// but that probe missed submodules whose lockable patterns live in nested
+		// .gitattributes (e.g. <sub>/Content/.gitattributes) or whose top-level file is
+		// missing entirely — and a missed submodule meant its locks never appeared in the
+		// editor across restarts (CLAUDE.md "Submodule LFS locks not visible after restart").
+		//
+		// The original perf concern (avoid 30+ remote calls per poll cycle) is now
+		// addressed by:
+		//   - concurrent polls (ParallelFor in Cmd_UpdateStatus / Cmd_Connect)
+		//   - per-repo URL cache in FGitLink_LfsHttpClient (resolved once, not per poll)
+		//   - per-host backoff on 429 responses
+		//   - graceful subprocess fallback when endpoint resolution fails for a repo
+		//
+		// Endpoint resolution below will silently no-op for non-LFS submodules (no LFS URL
+		// in their git config), so the runtime cost of including them here is bounded to
+		// one resolve attempt at connect time.
+		_LfsSubmodulePaths = _SubmodulePaths;
+
+		UE_LOG(LogGitLink, Log,
+			TEXT("CheckRepositoryStatus: treating all %d submodules as LFS candidates (endpoint resolution will filter)"),
+			_LfsSubmodulePaths.Num());
 
 		for (const FString& SubPath : _SubmodulePaths)
 		{
@@ -430,13 +458,31 @@ auto FGitLink_Provider::GetState(
 		{
 			State->_State.bInSubmodule = true;
 
-			// If we don't yet have a real Tree state for this file, default to Unmodified
-			// — it's tracked in the submodule's repo, just not visible from the parent's
-			// libgit2 status walk (which doesn't recurse into submodules).
+			// If we don't yet have a real Tree state for this file, decide between two
+			// optimistic defaults based on the per-submodule tracked-files index built at
+			// connect time (Is_TrackedInSubmodule):
+			//
+			//   - Tracked in the submodule's index → default Unmodified. The parent's
+			//     libgit2 status walk doesn't recurse into submodules, so we'd otherwise
+			//     have no entry for clean tracked submodule files. This default keeps
+			//     CanCheckout truthy until the next per-submodule status walk in
+			//     Cmd_UpdateStatus stamps the real state.
+			//
+			//   - NOT in the tracked set → leave NotInRepo. This is the "brand-new file
+			//     in a submodule" case. Without this guard, Tree=Unmodified would let
+			//     CanCheckout return true and the editor would prompt to LFS-lock a
+			//     file that isn't even in git yet. Cmd_MarkForAdd is the correct flow
+			//     for these files; once they're staged the next UpdateStatus pass
+			//     stamps Tree=Staged via the per-submodule status walk.
 			if (State->_State.Tree == EGitLink_TreeState::NotInRepo ||
 				State->_State.Tree == EGitLink_TreeState::Unset)
 			{
-				State->_State.Tree = EGitLink_TreeState::Unmodified;
+				if (Is_TrackedInSubmodule(Normalized))
+				{
+					State->_State.Tree = EGitLink_TreeState::Unmodified;
+				}
+				// else: leave Tree=NotInRepo. CanCheckout's bUntracked guard fires on
+				// NotInRepo and blocks the misleading "check out?" prompt for new files.
 			}
 		}
 
@@ -740,6 +786,34 @@ auto FGitLink_Provider::Get_SubmoduleRoot(const FString& InAbsolutePath) const -
 		{ return SubPath; }
 	}
 	return FString();
+}
+
+auto FGitLink_Provider::Is_TrackedInSubmodule(const FString& InAbsolutePath) const -> bool
+{
+	if (_SubmoduleTrackedSets.IsEmpty())
+	{ return false; }
+
+	FString Normalized = FPaths::ConvertRelativePathToFull(InAbsolutePath);
+	FPaths::NormalizeFilename(Normalized);
+
+	for (const TPair<FString, TSet<FString>>& Pair : _SubmoduleTrackedSets)
+	{
+		const FString& SubRoot = Pair.Key;  // has trailing forward slash
+		if (!Normalized.StartsWith(SubRoot, ESearchCase::IgnoreCase))
+		{ continue; }
+
+		FString Relative = Normalized.RightChop(SubRoot.Len());
+		Relative.ReplaceInline(TEXT("\\"), TEXT("/"));
+		Relative.RemoveFromStart(TEXT("/"));
+		Relative = Relative.ToLower();
+		if (Pair.Value.Contains(Relative))
+		{ return true; }
+
+		// File is inside this submodule but not tracked. Don't fall through to other
+		// submodules — submodule roots don't overlap.
+		return false;
+	}
+	return false;
 }
 
 auto FGitLink_Provider::Open_SubmoduleRepositoryFor(const FString& InAbsolutePath) const

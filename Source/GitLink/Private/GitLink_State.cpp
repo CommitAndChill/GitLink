@@ -231,6 +231,18 @@ auto FGitLink_FileState::CanCheckout() const -> bool
 	|| _State.Tree == EGitLink_TreeState::Ignored
 	|| _State.Tree == EGitLink_TreeState::NotInRepo;
 
+	// Files that have been staged for addition but never committed (File=Added) must NOT
+	// be lockable. The lock semantics are only meaningful once the file exists in HEAD —
+	// before commit, no other working copy can have a conflicting version, so a lock is
+	// nothing but noise. Worse, the editor's auto-checkout-on-save flow runs CheckOut
+	// immediately after MarkForAdd, which (without this guard) prompted users to lock
+	// every newly-created asset. Same logic applies to Deleted-but-not-committed files:
+	// the lock should remain held by whoever was modifying the file until the deletion
+	// is committed; CheckIn releases it then. We don't add Deleted here because the
+	// editor never offers CheckOut on a deleted file in practice, but the principle is
+	// the same.
+	const bool bUncommittedAdd = _State.File == EGitLink_FileState::Added;
+
 	// Permissive policy for the lock state: allow checkout unless we positively know the
 	// file is unlockable or already locked. Files that haven't been fully queried yet
 	// (Lock == Unknown or Unset) are given the benefit of the doubt — Cmd_CheckOut will
@@ -241,7 +253,7 @@ auto FGitLink_FileState::CanCheckout() const -> bool
 	&& _State.Lock != EGitLink_LockState::Locked
 	&& _State.Lock != EGitLink_LockState::LockedOther;
 
-	return !bUntracked && bLockOk;
+	return !bUntracked && !bUncommittedAdd && bLockOk;
 }
 
 auto FGitLink_FileState::IsCheckedOut() const -> bool
@@ -295,12 +307,19 @@ auto FGitLink_FileState::IsCurrent() const -> bool
 
 auto FGitLink_FileState::IsSourceControlled() const -> bool
 {
-	// Submodule files are under source control (in the submodule's repo). Return true here
-	// so the right-click "History" menu item stays enabled — history queries open the
-	// submodule's repo temporarily via Get_SubmoduleRoot (see Cmd_UpdateStatus::BuildHistory).
-	if (_State.bInSubmodule)
-	{ return true; }
-
+	// Tree-based check applies uniformly to outer-repo and submodule files now that
+	// Provider::GetState consults Is_TrackedInSubmodule and stamps Tree=Unmodified for
+	// tracked submodule files (via the per-submodule index built at connect). Untracked
+	// submodule files correctly fall through to Tree=Untracked / NotInRepo here and
+	// report not-source-controlled — which is what stops the editor's auto-CheckOut-on-save
+	// flow from trying to LFS-lock a brand-new file. Previously this predicate was
+	// unconditionally true for any submodule file (a workaround for the parent's
+	// libgit2 status walk not seeing inside submodules), and that's exactly what
+	// caused the "asks to lock newly created files in submodules" regression — main
+	// repo never had this bug because it goes through the same Tree gate.
+	//
+	// History / Diff for tracked submodule files still work: their Tree=Unmodified
+	// satisfies this predicate.
 	return _State.Tree != EGitLink_TreeState::Untracked
 	    && _State.Tree != EGitLink_TreeState::Ignored
 	    && _State.Tree != EGitLink_TreeState::NotInRepo

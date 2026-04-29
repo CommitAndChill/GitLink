@@ -537,18 +537,30 @@ namespace gitlink::cmd
 					FGitLink_CompositeState Clean;
 					Clean.File = EGitLink_FileState::Unknown;
 
-					// Submodule files: stamp bInSubmodule so command code can route correctly,
-					// and default Tree=Unmodified (we can't see inside the submodule from the
-					// parent's TrackedSet). The next timer-driven full-scan in this command
-					// will run per-submodule Get_Status and stamp the real Tree state — until
-					// then this is the optimistic default. IsSourceControlled() forces true
-					// for submodule files so History stays enabled regardless.
+					// Submodule files need the same tracked-vs-untracked decision the parent
+					// makes via TrackedSet.Contains(RelPath), but driven by a per-submodule
+					// tracked-files index built once at connect (Provider::Is_TrackedInSubmodule).
+					// Without this distinction, brand-new files in a submodule would default to
+					// Tree=Unmodified — which makes CanCheckout return true and the editor
+					// auto-prompts to LFS-lock a file that isn't even in git yet (and revert
+					// can't break the cycle: unlock succeeds but the next save re-locks it).
+					// IsSourceControlled() forces true for submodule files so History stays
+					// enabled regardless of the Tree value here.
 					const bool bInSubmodule = InCtx.Provider.Is_InSubmodule(Normalized);
 					Clean.bInSubmodule = bInSubmodule;
 
-					Clean.Tree = (bInSubmodule || TrackedSet.Contains(RelPath))
-						? EGitLink_TreeState::Unmodified
-						: EGitLink_TreeState::Untracked;
+					if (bInSubmodule)
+					{
+						Clean.Tree = InCtx.Provider.Is_TrackedInSubmodule(Normalized)
+							? EGitLink_TreeState::Unmodified
+							: EGitLink_TreeState::Untracked;
+					}
+					else
+					{
+						Clean.Tree = TrackedSet.Contains(RelPath)
+							? EGitLink_TreeState::Unmodified
+							: EGitLink_TreeState::Untracked;
+					}
 
 					Result.UpdatedStates.Add(BuildState(Normalized, Clean));
 				}

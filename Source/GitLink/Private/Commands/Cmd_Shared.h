@@ -187,9 +187,30 @@ namespace gitlink::cmd
 		return Out;
 	}
 
-	// Releases any LFS locks that the current user holds on the given files. Best-effort:
-	// files that aren't locked (or aren't lockable) are silently skipped, so callers can pass
-	// a mixed set without pre-filtering. Returns true on overall success.
+	// Outcome of an unlock attempt across a batch of files. Successful files are split out
+	// from failed ones so callers can stamp Lock=NotLocked only on files that actually got
+	// released, and leave the rest as Locked in the cache so the editor still shows them as
+	// checked out and the user can retry. Without this split, a silent unlock failure flips
+	// the cache to NotLocked while the server lock persists — that's the "submodule unlock
+	// stuck" bug (lock owner identity vs git config user.name mismatch is the common cause).
+	struct FLfsUnlockOutcome
+	{
+		// Absolute paths that were either successfully released OR were skipped because they
+		// had nothing to release (non-lockable, LockedOther, no LFS subsystem, etc). Either
+		// way the caller should stamp Lock=NotLocked / Unlockable for these.
+		TSet<FString> Released;
+
+		// Absolute paths in batches whose `git lfs unlock` invocation failed. Caller must
+		// leave these as Lock=Locked so the user can retry without losing the cache state.
+		TArray<FString> FailedPaths;
+
+		// One entry per failing batch, suitable for surfacing to the user in a command-result
+		// FText (combined into a single error message at the call site).
+		TArray<FString> ErrorMessages;
+	};
+
+	// Releases any LFS locks that the current user holds on the given files. Best-effort
+	// per *file*: a failure on one batch does not abort the others.
 	//
 	// Used by Cmd_Revert (release after discarding local changes) and Cmd_CheckIn (release
 	// after the commit so the file is free for the next editor to check out).
@@ -203,35 +224,53 @@ namespace gitlink::cmd
 	// files are still attempted because the editor cache might be stale.
 	inline auto Release_LfsLocksBestEffort(
 		FCommandContext&       InCtx,
-		const TArray<FString>& InAbsoluteFiles) -> bool
+		const TArray<FString>& InAbsoluteFiles) -> FLfsUnlockOutcome
 	{
+		FLfsUnlockOutcome Outcome;
+		Outcome.Released.Reserve(InAbsoluteFiles.Num());
+
+		// Helper: every input file becomes "released" (caller stamps NotLocked). Used for
+		// the no-LFS-subsystem early returns to preserve the previous bool=true semantics.
+		auto MarkAllReleased = [&]()
+		{
+			for (const FString& Absolute : InAbsoluteFiles)
+			{ Outcome.Released.Add(Absolute); }
+		};
+
 		if (InCtx.Subprocess == nullptr || !InCtx.Subprocess->IsValid())
-		{ return true; }  // no LFS subsystem, nothing to do
+		{ MarkAllReleased(); return Outcome; }
 
 		if (!InCtx.Provider.Is_LfsAvailable())
-		{ return true; }
+		{ MarkAllReleased(); return Outcome; }
 
 		// Filter to files that are (a) lockable by extension and (b) plausibly held by us.
+		// Files we don't even attempt count as "released" from the caller's POV (there was
+		// no lock on them to begin with), preserving the previous filter behavior.
 		TArray<FString> Filtered;
 		Filtered.Reserve(InAbsoluteFiles.Num());
 		for (const FString& Absolute : InAbsoluteFiles)
 		{
 			if (!InCtx.Provider.Is_FileLockable(Absolute))
-			{ continue; }
+			{
+				Outcome.Released.Add(Absolute);
+				continue;
+			}
 
 			const FGitLink_FileStateRef State = InCtx.StateCache.Find_FileState(Absolute);
 			if (State->_State.Lock == EGitLink_LockState::Unlockable ||
 			    State->_State.Lock == EGitLink_LockState::LockedOther)
-			{ continue; }  // definitely not ours to release
+			{
+				Outcome.Released.Add(Absolute);
+				continue;  // definitely not ours to release
+			}
 
 			Filtered.Add(Absolute);
 		}
 
 		if (Filtered.IsEmpty())
-		{ return true; }
+		{ return Outcome; }
 
 		const TArray<FRepoBatch> Batches = PartitionByRepo(InCtx, Filtered);
-		bool bAllOk = true;
 
 		for (const FRepoBatch& Batch : Batches)
 		{
@@ -251,12 +290,22 @@ namespace gitlink::cmd
 			const FGitLink_SubprocessResult Result = InCtx.Subprocess->RunLfs(UnlockArgs, CwdOverride);
 			if (!Result.IsSuccess())
 			{
+				const FString ErrText = Result.Get_CombinedError();
 				UE_LOG(LogGitLink, Warning,
 					TEXT("Release_LfsLocksBestEffort: git lfs unlock (cwd='%s') returned: %s"),
-					*Batch.RepoRoot, *Result.Get_CombinedError());
-				bAllOk = false;
+					*Batch.RepoRoot, *ErrText);
+
+				// Every file in the failed batch stays Locked in the caller's view. Stamping
+				// NotLocked while the server lock persists is the precise bug this fixes.
+				Outcome.FailedPaths.Append(Batch.AbsoluteFiles);
+				Outcome.ErrorMessages.Add(FString::Printf(
+					TEXT("git lfs unlock (cwd='%s') failed: %s"),
+					*Batch.RepoRoot, *ErrText));
 				continue;
 			}
+
+			for (const FString& Abs : Batch.AbsoluteFiles)
+			{ Outcome.Released.Add(Abs); }
 
 			UE_LOG(LogGitLink, Log,
 				TEXT("Release_LfsLocksBestEffort: unlocked %d file(s) in %s"),
@@ -264,7 +313,7 @@ namespace gitlink::cmd
 				Batch.bIsSubmodule ? *FString::Printf(TEXT("submodule '%s'"), *Batch.RepoRoot) : TEXT("outer repo"));
 		}
 
-		return bAllOk;
+		return Outcome;
 	}
 
 	// ----------------------------------------------------------------------------------------------------------------
