@@ -33,6 +33,12 @@ namespace gitlink::lfs_http
 		// password. Returns true if a non-empty password was found (username may be empty
 		// for token-only flows).
 		GITLINK_API auto Parse_CredentialOutput(const FString& InText, FString& OutUser, FString& OutPass) -> bool;
+
+		// Parses an HTTP `Retry-After` header value into seconds. Accepts integer seconds
+		// (the form GitHub uses); falls back to InDefaultSec for HTTP-date form or any
+		// non-numeric string. Returns 0 for empty/whitespace input — caller treats this
+		// as "no Retry-After header was present".
+		GITLINK_API auto Parse_RetryAfterSeconds(const FString& InHeaderValue, int32 InDefaultSec) -> int32;
 	}
 }
 

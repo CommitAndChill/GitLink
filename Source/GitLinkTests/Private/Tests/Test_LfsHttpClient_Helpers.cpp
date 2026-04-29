@@ -20,6 +20,7 @@ using gitlink::lfs_http::detail::Get_HostKey;
 using gitlink::lfs_http::detail::Get_HostPort;
 using gitlink::lfs_http::detail::Convert_SshRemoteToHttps;
 using gitlink::lfs_http::detail::Parse_CredentialOutput;
+using gitlink::lfs_http::detail::Parse_RetryAfterSeconds;
 
 // --------------------------------------------------------------------------------------------------------------------
 // Get_HostKey: "scheme://host[:port]" extraction. Used as the credential-cache key, so two URLs
@@ -201,6 +202,51 @@ bool FGitLinkTests_LfsHttp_CredentialOutput::RunTest(const FString& /*Parameters
 		TestTrue (TEXT("equals in value tolerated"), Parse_CredentialOutput(Output, User, Pass));
 		TestEqual(TEXT("password preserved"),        Pass, FString(TEXT("base64==")));
 	}
+
+	return true;
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+// Parse_RetryAfterSeconds: parses HTTP `Retry-After` header. Bug-prone failure modes:
+//   - "0" or negative parsed as "back off zero" instead of "use default" → no actual backoff
+//   - HTTP-date form crashes / returns 0 instead of falling back to default
+//   - Empty header treated as "back off forever"
+// All of these would silently break the 429 backoff path.
+// --------------------------------------------------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FGitLinkTests_LfsHttp_RetryAfter,
+	"GitLink.LfsHttp.RetryAfter",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FGitLinkTests_LfsHttp_RetryAfter::RunTest(const FString& /*Parameters*/)
+{
+	constexpr int32 kDefault = 60;
+
+	// Empty / whitespace → 0 (== "no header was present", caller distinguishes from "back off N").
+	TestEqual(TEXT("empty returns 0"),      Parse_RetryAfterSeconds(TEXT(""), kDefault),     0);
+	TestEqual(TEXT("whitespace returns 0"), Parse_RetryAfterSeconds(TEXT("   "), kDefault),  0);
+
+	// Integer seconds (the GitHub form).
+	TestEqual(TEXT("\"30\" → 30"),  Parse_RetryAfterSeconds(TEXT("30"), kDefault),   30);
+	TestEqual(TEXT("\"120\" → 120"), Parse_RetryAfterSeconds(TEXT("120"), kDefault), 120);
+	TestEqual(TEXT("leading/trailing whitespace tolerated"),
+		Parse_RetryAfterSeconds(TEXT("  45  "), kDefault), 45);
+
+	// Zero or negative → use default. A literal "0" would otherwise translate to "no backoff",
+	// which defeats the whole point of the 429 path.
+	TestEqual(TEXT("\"0\" → default"),  Parse_RetryAfterSeconds(TEXT("0"), kDefault),   kDefault);
+	TestEqual(TEXT("\"-5\" → default"), Parse_RetryAfterSeconds(TEXT("-5"), kDefault),  kDefault);
+
+	// HTTP-date form falls back to default. We don't implement wall-clock parsing because
+	// servers in the wild (GitHub at least) use the integer form, and clock-skew handling
+	// is more error-prone than just waiting the default.
+	TestEqual(TEXT("HTTP-date → default"),
+		Parse_RetryAfterSeconds(TEXT("Wed, 21 Oct 2026 07:28:00 GMT"), kDefault), kDefault);
+
+	// Garbage → default (don't crash, don't park forever).
+	TestEqual(TEXT("garbage → default"),
+		Parse_RetryAfterSeconds(TEXT("not a number"), kDefault), kDefault);
 
 	return true;
 }
