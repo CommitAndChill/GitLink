@@ -97,6 +97,25 @@ public:
 	//   - Locks missing the `path` field are silently skipped.
 	static auto Parse_LfsVerifyJson(const FString& InJsonText) -> FLfsLocksSnapshot;
 
+	// Result of a single-file `GET /locks?path=...` query. The LFS spec returns a `locks` array
+	// rather than the `ours`/`theirs` split that `/locks/verify` provides, so the caller must
+	// classify Locked-by-us vs LockedOther itself (typically by comparing OutOwner to a cached
+	// LFS-server identity).
+	//
+	// Contract:
+	//   - bSuccess is true iff the JSON parses cleanly AND a non-empty `locks` array was found.
+	//   - On bSuccess=false with an otherwise-OK response (empty `locks` array), the caller
+	//     should treat this as "no lock exists for this path".
+	//   - First entry in the `locks` array wins — path-filtered queries should never return more
+	//     than one match in practice.
+	struct FLfsSingleLockParse
+	{
+		bool    bFoundLock = false;
+		FString Path;
+		FString OwnerName;
+	};
+	static auto Parse_LocksByPathJson(const FString& InJsonText) -> FLfsSingleLockParse;
+
 	// Runs `git <args>` and writes stdout (binary-safe) to InOutputFile.
 	// Used by FGitLink_Revision::Get to extract file content at a specific commit.
 	// Returns true on success (exit code 0).

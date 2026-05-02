@@ -314,6 +314,49 @@ auto FGitLink_Subprocess::Parse_LfsVerifyJson(const FString& InJsonText) -> FLfs
 	return Out;
 }
 
+auto FGitLink_Subprocess::Parse_LocksByPathJson(const FString& InJsonText) -> FLfsSingleLockParse
+{
+	FLfsSingleLockParse Out;
+
+	const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(InJsonText);
+	TSharedPtr<FJsonObject> Root;
+	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
+	{ return Out; }
+
+	const TArray<TSharedPtr<FJsonValue>>* LocksArr = nullptr;
+	if (!Root->TryGetArrayField(TEXT("locks"), LocksArr) || LocksArr == nullptr || LocksArr->Num() == 0)
+	{ return Out; }
+
+	// First valid entry wins. Path-filtered queries should return at most one result; if a server
+	// somehow returns multiple, picking the first matches what `/locks/verify` would have done
+	// (it doesn't deduplicate either).
+	for (const TSharedPtr<FJsonValue>& Val : *LocksArr)
+	{
+		const TSharedPtr<FJsonObject>* AsObj = nullptr;
+		if (!Val.IsValid() || !Val->TryGetObject(AsObj) || !AsObj || !AsObj->IsValid())
+		{ continue; }
+
+		FString Path;
+		if (!(*AsObj)->TryGetStringField(TEXT("path"), Path) || Path.IsEmpty())
+		{ continue; }
+
+		FString OwnerName;
+		const TSharedPtr<FJsonObject>* OwnerObj = nullptr;
+		if ((*AsObj)->TryGetObjectField(TEXT("owner"), OwnerObj) && OwnerObj && OwnerObj->IsValid())
+		{
+			(*OwnerObj)->TryGetStringField(TEXT("name"), OwnerName);
+		}
+
+		Path.ReplaceInline(TEXT("\\"), TEXT("/"));
+		Out.bFoundLock = true;
+		Out.Path       = Path;
+		Out.OwnerName  = OwnerName;
+		return Out;
+	}
+
+	return Out;
+}
+
 auto FGitLink_Subprocess::RunToFile(const TArray<FString>& InArgs, const FString& InOutputFile,
 	const FString& InWorkingDirOverride) -> bool
 {

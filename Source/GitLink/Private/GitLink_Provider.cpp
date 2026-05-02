@@ -12,8 +12,13 @@
 #include "GitLinkLog.h"
 #include "Slate/SGitLink_Settings.h"
 
+#include <Async/Async.h>
+#include <Editor.h>
+#include <Framework/Application/SlateApplication.h>
 #include <Misc/App.h>
 #include <Misc/FileHelper.h>
+#include <Misc/PackageName.h>
+#include <Subsystems/AssetEditorSubsystem.h>
 #include <UObject/ObjectSaveContext.h>
 #include <UObject/Package.h>
 
@@ -83,6 +88,30 @@ auto FGitLink_Provider::Close() -> void
 	{
 		UPackage::PackageSavedWithContextEvent.Remove(_PackageSavedHandle);
 		_PackageSavedHandle.Reset();
+	}
+
+	// Stage B — unwire single-file LFS lock refresh signals.
+	if (_AppActivationHandle.IsValid() && FSlateApplication::IsInitialized())
+	{
+		FSlateApplication::Get().OnApplicationActivationStateChanged().Remove(_AppActivationHandle);
+		_AppActivationHandle.Reset();
+	}
+	if (_AssetEditorOpenedHandle.IsValid() && GEditor != nullptr)
+	{
+		if (UAssetEditorSubsystem* AssetEditor = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
+		{
+			AssetEditor->OnAssetOpenedInEditor().Remove(_AssetEditorOpenedHandle);
+		}
+		_AssetEditorOpenedHandle.Reset();
+	}
+	if (_PackageDirtiedHandle.IsValid())
+	{
+		UPackage::PackageMarkedDirtyEvent.Remove(_PackageDirtiedHandle);
+		_PackageDirtiedHandle.Reset();
+	}
+	{
+		FScopeLock Lock(&_LockRefreshDebounceLock);
+		_LastLockRefreshSec.Reset();
 	}
 
 	if (_Menu.IsValid())
@@ -340,6 +369,86 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		});
 #endif
 
+	// Stage B — single-file LFS lock refresh signals. Wire three orthogonal triggers and
+	// route them through Request_LockRefreshForFile, which debounces and runs the HTTP probe
+	// off the game thread. Each handle is rebound here on re-init; Close() unbinds them.
+
+	// (a) App activation — when the editor regains focus, refresh open assets in case
+	// teammates locked something while we were backgrounded. Cap to a small batch to avoid
+	// pounding the LFS server with one request per open tab on Alt-Tab.
+	if (_AppActivationHandle.IsValid() && FSlateApplication::IsInitialized())
+	{
+		FSlateApplication::Get().OnApplicationActivationStateChanged().Remove(_AppActivationHandle);
+	}
+	if (FSlateApplication::IsInitialized())
+	{
+		_AppActivationHandle = FSlateApplication::Get().OnApplicationActivationStateChanged().AddLambda(
+			[this](const bool bInIsActive)
+			{
+				if (!bInIsActive || GEditor == nullptr) { return; }
+				UAssetEditorSubsystem* AssetEditor = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+				if (AssetEditor == nullptr) { return; }
+
+				constexpr int32 kMaxBatchOnActivate = 16;
+				int32 Issued = 0;
+				for (UObject* Asset : AssetEditor->GetAllEditedAssets())
+				{
+					if (Asset == nullptr) { continue; }
+					UPackage* Pkg = Asset->GetOutermost();
+					if (Pkg == nullptr) { continue; }
+					FString PackageFilename;
+					if (!FPackageName::TryConvertLongPackageNameToFilename(
+							Pkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+					{ continue; }
+					Request_LockRefreshForFile(PackageFilename);
+					if (++Issued >= kMaxBatchOnActivate) { break; }
+				}
+			});
+	}
+
+	// (b) Asset opened — fires when the user double-clicks an asset and the asset editor
+	// instantiates. Earlier than pre-checkout; gives the probe a head start so the icon is
+	// already accurate by the time the user can click Check Out.
+	if (_AssetEditorOpenedHandle.IsValid() && GEditor != nullptr)
+	{
+		if (UAssetEditorSubsystem* AssetEditor = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
+		{ AssetEditor->OnAssetOpenedInEditor().Remove(_AssetEditorOpenedHandle); }
+	}
+	if (GEditor != nullptr)
+	{
+		if (UAssetEditorSubsystem* AssetEditor = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
+		{
+			_AssetEditorOpenedHandle = AssetEditor->OnAssetOpenedInEditor().AddLambda(
+				[this](UObject* InAsset, IAssetEditorInstance* /*InInstance*/)
+				{
+					if (InAsset == nullptr) { return; }
+					UPackage* Pkg = InAsset->GetOutermost();
+					if (Pkg == nullptr) { return; }
+					FString PackageFilename;
+					if (!FPackageName::TryConvertLongPackageNameToFilename(
+							Pkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+					{ return; }
+					Request_LockRefreshForFile(PackageFilename);
+				});
+		}
+	}
+
+	// (c) Package dirtied — first user edit. Debounced like the others; the typical UX is
+	// "user edits something, then notices the lock state". A probe right at dirty-time is
+	// nearly always wasted, but cheap; it ensures the next CheckOut prompt is correct.
+	if (_PackageDirtiedHandle.IsValid())
+	{ UPackage::PackageMarkedDirtyEvent.Remove(_PackageDirtiedHandle); }
+	_PackageDirtiedHandle = UPackage::PackageMarkedDirtyEvent.AddLambda(
+		[this](UPackage* InPackage, bool /*bInWasDirty*/)
+		{
+			if (InPackage == nullptr) { return; }
+			FString PackageFilename;
+			if (!FPackageName::TryConvertLongPackageNameToFilename(
+					InPackage->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+			{ return; }
+			Request_LockRefreshForFile(PackageFilename);
+		});
+
 	// Register toolbar buttons (Push, Pull, Revert All, Refresh) in the SCC dropdown.
 	if (!_Menu.IsValid())
 	{
@@ -394,6 +503,136 @@ auto FGitLink_Provider::Request_ImmediatePoll() -> void
 {
 	if (_BackgroundPoll.IsValid())
 	{ _BackgroundPoll->Request_ImmediatePoll(); }
+}
+
+namespace
+{
+	// 2 seconds matches the foreground freshness target. A user opening 50 tabs in a burst
+	// (Alt-Tab → all open editors signal at once) shouldn't fire 50 simultaneous HTTPs; the
+	// debounce collapses repeated signals for the same path into one probe, while letting
+	// genuine activity through.
+	constexpr double kSingleFileRefreshDebounceSec = 2.0;
+}
+
+auto FGitLink_Provider::Request_LockRefreshForFile(const FString& InAbsolutePath) -> void
+{
+	if (!_bGitRepositoryFound || !_bLfsAvailable)
+	{ return; }
+
+	FGitLink_LfsHttpClient* HttpClient = _LfsHttpClient.Get();
+	if (HttpClient == nullptr || !gitlink::lfs_http::Is_Enabled())
+	{ return; }
+
+	// Normalize once — used for the cache lookup, debounce key, and the HTTP repo-relative
+	// derivation. The state cache normalizes its own keys, but the debounce map and the HTTP
+	// path want consistent input.
+	FString Normalized = FPaths::ConvertRelativePathToFull(InAbsolutePath);
+	FPaths::NormalizeFilename(Normalized);
+
+	if (!Normalized.StartsWith(_PathToRepositoryRoot))
+	{ return; }
+
+	if (!Is_FileLockable(Normalized))
+	{ return; }
+
+	// Submodule files: only probe tracked entries. Untracked-in-submodule = the file isn't in
+	// HEAD yet, so a server-side lock is meaningless and the f345260 "auto-lock-on-create"
+	// fix would be regressed if we let untracked files through to a lock probe → checkout.
+	if (Is_InSubmodule(Normalized) && !Is_TrackedInSubmodule(Normalized))
+	{ return; }
+
+	// Per-path debounce. Hot path — keep the critical section short.
+	const double NowSec = FPlatformTime::Seconds();
+	{
+		FScopeLock Lock(&_LockRefreshDebounceLock);
+		const double* LastSec = _LastLockRefreshSec.Find(Normalized);
+		if (LastSec != nullptr && (NowSec - *LastSec) < kSingleFileRefreshDebounceSec)
+		{ return; }
+		_LastLockRefreshSec.Add(Normalized, NowSec);
+	}
+
+	// Determine which repo the file belongs to (parent or a specific submodule). HTTP path
+	// is keyed by repo root; the repo's LFS endpoint must already be cached.
+	const FString RepoRoot = Is_InSubmodule(Normalized)
+		? Get_SubmoduleRoot(Normalized)
+		: _PathToRepositoryRoot;
+	if (RepoRoot.IsEmpty() || !HttpClient->Has_LfsUrl(RepoRoot))
+	{ return; }
+
+	UE_LOG(LogGitLink, Verbose,
+		TEXT("Request_LockRefreshForFile: probing '%s' (repo='%s')"), *Normalized, *RepoRoot);
+
+	// Off-thread the HTTP probe so the game thread (which fired the delegate) is never
+	// blocked. Marshal the result back via AsyncTask(GameThread) so the cache mutation is
+	// race-free with other readers.
+	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+		[this, Normalized, RepoRoot, HttpClient]()
+		{
+			const FGitLink_LfsHttpClient::FSingleFileLockResult Result =
+				HttpClient->Request_SingleFileLock(RepoRoot, Normalized);
+			if (!Result.bSuccess)
+			{ return; }
+
+			AsyncTask(ENamedThreads::GameThread,
+				[this, Normalized, Result]()
+				{
+					if (!_StateCache.IsValid())
+					{ return; }
+
+					const FGitLink_FileStateRef Existing = _StateCache->Find_FileState(Normalized);
+
+					// The single-file probe is scoped to teammate-driven transitions —
+					// NotLocked ↔ LockedOther, plus LockUser updates within LockedOther.
+					// Lock=Locked (held by us) is locally-authoritative: it's set by
+					// Cmd_CheckOut, cleared by Cmd_Revert / Cmd_CheckIn, and outside-our-
+					// control transitions are caught by the full-sweep lock-released
+					// detection in Cmd_UpdateStatus (which compares the cache against the
+					// full /locks/verify response, not a single-path probe that may be
+					// stale).
+					//
+					// Why this guard exists: GitHub LFS read replicas aren't immediately
+					// consistent after a `git lfs lock`. The post-CheckOut UpdateStatus
+					// fires this probe ~50 ms after the lock subprocess returns; the probe
+					// hits a replica that hasn't seen the new lock yet and reports
+					// NotLocked. Without this guard, the completion lambda flipped the
+					// cache from Lock=Locked back to NotLocked — the "click Lock → flicker
+					// → reverts to unlocked" UX from v0.3.1. Symmetric race after Cmd_Revert
+					// (probe returns stale Locked) was equally bad.
+					const EGitLink_LockState ExistingLock = Existing->_State.Lock;
+					if (ExistingLock == EGitLink_LockState::Locked
+						|| Result.Lock == EGitLink_LockState::Locked)
+					{ return; }
+
+					if (Existing->_State.Lock == Result.Lock
+						&& Existing->_State.LockUser == Result.LockOwner)
+					{ return; }  // no observable change — skip cache write + broadcast
+
+					FGitLink_CompositeState Composite = Existing->_State;
+					Composite.Lock     = Result.Lock;
+					Composite.LockUser = Result.LockOwner;
+					if (Composite.Tree == EGitLink_TreeState::NotInRepo
+						&& Result.Lock != EGitLink_LockState::NotLocked)
+					{
+						// Locked file we hadn't seen yet — give it a sensible Tree default so
+						// content-browser predicates don't read it as "not in repo".
+						Composite.Tree = EGitLink_TreeState::Unmodified;
+					}
+
+					FGitLink_FileStateRef NewState = MakeShared<FGitLink_FileState, ESPMode::ThreadSafe>(Normalized);
+					NewState->_State      = Composite;
+					NewState->_Changelist = Existing->_Changelist;
+					NewState->_History    = Existing->_History;
+					NewState->_TimeStamp  = FDateTime::UtcNow();
+
+					_StateCache->Set_FileState(Normalized, NewState);
+
+					UE_LOG(LogGitLink, Verbose,
+						TEXT("Request_LockRefreshForFile: '%s' Lock=%d Owner='%s' (single-file probe)"),
+						*Normalized, static_cast<int32>(Result.Lock), *Result.LockOwner);
+
+					Broadcast_StateChanged();
+				});
+		});
 }
 
 // --------------------------------------------------------------------------------------------------------------------

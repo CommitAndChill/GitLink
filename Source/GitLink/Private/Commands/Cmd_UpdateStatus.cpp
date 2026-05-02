@@ -23,12 +23,18 @@ namespace gitlink::op
 namespace
 {
 	// Throttle for the expensive cross-repo sweep (per-submodule git status + per-repo LFS
-	// lock poll). Background poll fires every 30s on the timer. Saves trigger an immediate
-	// re-poll which would otherwise re-run the full 34-repo sweep — that's the source of
-	// the visible CPU spikes. We skip the sweep if it ran recently; the regular 30s timer
-	// poll always runs because the throttle is < interval.
+	// lock poll). Background poll fires every PollIntervalSeconds on the timer (default 120s
+	// post-Stage B). Saves trigger an immediate re-poll which would otherwise re-run the full
+	// 34-repo sweep — that's the source of the visible CPU spikes. We skip the sweep if it
+	// ran recently; the regular timer poll always runs because the throttle is < interval.
+	//
+	// Stage B raised this from 20s → 110s to match the 120s default sweep cadence. Foreground
+	// freshness (≤2s on user-touched files) is now driven by single-file probes from editor
+	// delegates (focus, package-dirty, asset-open, pre-checkout) — see GitLink_LfsHttpClient's
+	// Request_SingleFileLock — so the cross-repo sweep no longer needs to be the latency floor
+	// for "someone else locked this file".
 	TAtomic<double> GLastFullSweepSec{0.0};
-	constexpr double GFullSweepThrottleSec = 20.0;
+	constexpr double GFullSweepThrottleSec = 110.0;
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -518,6 +524,39 @@ namespace gitlink::cmd
 			TrackedSet.Reserve(TrackedRelPaths.Num());
 			for (const FString& RelPath : TrackedRelPaths)
 			{ TrackedSet.Add(RelPath); }
+
+			// Stage B — fire-and-forget async LFS lock refresh for any lockable requested file.
+			//
+			// Earlier rev of this code blocked the calling thread on `Request_SingleFileLock`
+			// inside a ParallelFor. That deadlocked when UpdateStatus was dispatched
+			// synchronously on the game thread (the editor's pre-checkout flow does this):
+			// UE's HTTP module needs the game thread to tick to fire completion delegates, but
+			// the game thread was blocked inside our `FEvent::Wait`, so every probe ran out the
+			// 12 s timeout. With ~80 files (typical content-browser refresh) at 8-worker
+			// parallelism that pinned the editor for ~2 minutes at ~85% CPU on the spinning
+			// workers — exactly what was reported in v0.3.0.
+			//
+			// Fix: kick off async refreshes via Provider::Request_LockRefreshForFile (the same
+			// path the editor delegates use — background thread, debounced per-path at 2 s,
+			// cache mutation marshalled back to the game thread). The game thread is never
+			// blocked. Foreground freshness still holds because:
+			//   1. The asset-opened / package-dirty / focus delegates already probed the file
+			//      shortly before the editor dispatched this UpdateStatus. The 2s debounce
+			//      collapses our redispatch into the existing in-flight probe.
+			//   2. When the async probe completes, `OnSourceControlStateChanged` fires and the
+			//      editor re-queries — the second cache read sees the fresh state.
+			//   3. The cached lock state from the previous successful sweep / probe is what
+			//      gets emitted on this UpdateStatus, which is far less stale than the 30s
+			//      Stage A baseline.
+			if (gitlink::lfs_http::Is_Enabled()
+				&& InCtx.Provider.Is_LfsAvailable()
+				&& InCtx.Provider.Get_LfsHttpClient() != nullptr)
+			{
+				for (const FString& RequestedRaw : InFiles)
+				{
+					InCtx.Provider.Request_LockRefreshForFile(RequestedRaw);
+				}
+			}
 
 			for (const FString& RequestedRaw : InFiles)
 			{
