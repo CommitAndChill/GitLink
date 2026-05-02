@@ -35,6 +35,18 @@ namespace gitlink::cmd
 	// each cycle in well under the 30s background-poll interval.
 	constexpr int32 GMaxConcurrentRepoWorkers = 8;
 
+	// Cap for the CPU-bound per-submodule libgit2 `Get_Status()` walks specifically.
+	// `GMaxConcurrentRepoWorkers` is sized for the network-bound LFS HTTP poll (8 in flight
+	// hides per-request latency without saturating cores — most workers spend their time in
+	// FEvent::Wait). Status walks are the opposite shape: each walk reads the entire
+	// submodule's working tree off-disk and hashes it through libgit2 — pure CPU + disk.
+	// Stage B observation: with 34 submodules in the BB project, an 8-worker fan-out of
+	// status walks pinned all 8 physical cores during each sweep, producing the visible
+	// 120 s CPU spike. 4 keeps each spike under ~50% aggregate CPU; the sweep is background,
+	// so the doubled wall-clock cost (still well under the 120 s poll interval on this
+	// hardware) is invisible.
+	constexpr int32 GMaxConcurrentStatusWalkers = 4;
+
 	// Runs InWork on every index in [0, InCount) with at most InMaxConcurrent invocations
 	// in flight at any one time. Implemented as sequential chunks of ParallelFor — every
 	// chunk fans out to the thread pool, but no more than InMaxConcurrent tasks run
