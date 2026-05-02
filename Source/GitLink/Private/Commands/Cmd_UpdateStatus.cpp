@@ -301,7 +301,7 @@ namespace gitlink::cmd
 					TArray<FSubStatus> SubStatuses;
 					SubStatuses.SetNum(SubmodulePaths.Num());
 
-					ParallelFor_BoundedConcurrency(SubmodulePaths.Num(), GMaxConcurrentRepoWorkers, [&](int32 Idx)
+					ParallelFor_BoundedConcurrency(SubmodulePaths.Num(), GMaxConcurrentStatusWalkers, [&](int32 Idx)
 					{
 						TUniquePtr<gitlink::FRepository> SubRepo =
 							InCtx.Provider.Open_SubmoduleRepositoryFor(SubmodulePaths[Idx]);
