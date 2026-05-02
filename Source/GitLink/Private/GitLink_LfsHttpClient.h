@@ -2,6 +2,8 @@
 
 #include "GitLink_Subprocess.h"
 
+#include "GitLink/GitLink_State.h"
+
 #include <CoreMinimal.h>
 #include <HAL/CriticalSection.h>
 
@@ -33,6 +35,14 @@ namespace gitlink::lfs_http
 		// password. Returns true if a non-empty password was found (username may be empty
 		// for token-only flows).
 		GITLINK_API auto Parse_CredentialOutput(const FString& InText, FString& OutUser, FString& OutPass) -> bool;
+
+		// Extracts the LFS-server identity (`owner.name` of any one of the entries in
+		// `Page.OursPaths`) from a successful `/locks/verify` page. Returns true and writes
+		// OutName when a non-empty owner name was found; false and leaves OutName untouched
+		// otherwise. This is how the single-file path classifies Locked-vs-LockedOther without
+		// needing a second `/locks/verify` round-trip per probe.
+		GITLINK_API auto Extract_IdentityFromVerifyPage(
+			const FGitLink_Subprocess::FLfsLocksSnapshot& InPage, FString& OutName) -> bool;
 
 		// Parses an HTTP `Retry-After` header value into seconds. Accepts integer seconds
 		// (the form GitHub uses); falls back to InDefaultSec for HTTP-date form or any
@@ -93,6 +103,37 @@ public:
 	// Blocks the caller for up to ~10 s while the request completes.
 	auto Request_LocksVerify(const FString& InRepoRoot) -> FGitLink_Subprocess::FLfsLocksSnapshot;
 
+	// Stage B — single-file lock probe. Result of a synchronous `GET /locks?path=<rel>` query
+	// against the LFS server for the repo containing InAbsolutePath. Used by the editor-delegate
+	// path (focus / asset-opened / package-dirty) and the explicit-file-list pre-checkout path
+	// in Cmd_UpdateStatus to keep foreground freshness ≤2 s without paying the cross-repo sweep
+	// every poll.
+	struct FSingleFileLockResult
+	{
+		bool                 bSuccess  = false;                         // true iff the HTTP query parsed OK
+		EGitLink_LockState   Lock      = EGitLink_LockState::NotLocked; // Locked / LockedOther / NotLocked
+		FString              LockOwner;                                  // empty when NotLocked
+	};
+
+	// Issues `GET <lfsUrl>/locks?path=<repo-relative URL-encoded>`. Classifies the returned lock
+	// (if any) as Locked vs LockedOther by comparing `owner.name` to the cached LFS-server
+	// identity for the host (populated lazily from the first successful `/locks/verify`). When
+	// the identity hasn't been learned yet, the result is pessimistically reported as
+	// LockedOther — converges to correct after the first sweep.
+	//
+	// Returns bSuccess=false on transport failure / 401 (after one re-fill) / 429 (host in
+	// backoff) / endpoint-unresolved. Caller should leave cached lock state alone in that case.
+	//
+	// InRepoRoot must be the repo root containing InAbsolutePath (resolved by the caller via
+	// Provider::Is_InSubmodule + Get_SubmoduleRoot or RepoRootAbsolute).
+	auto Request_SingleFileLock(
+		const FString& InRepoRoot,
+		const FString& InAbsolutePath) -> FSingleFileLockResult;
+
+	// Cached LFS-server identity for a host key (e.g. "https://github.com"). Empty if no
+	// successful `/locks/verify` has populated it yet. Test-friendly accessor.
+	auto Get_IdentityForHost(const FString& InHostKey) const -> FString;
+
 private:
 	struct FResolvedEndpoint
 	{
@@ -118,6 +159,22 @@ private:
 		int32&                   OutHttpStatus,
 		int32&                   OutRetryAfterSec) -> FGitLink_Subprocess::FLfsLocksSnapshot;
 
+	// Stage B — single-file probe. Issues `GET <LfsUrl>/locks?path=<repo-relative URL-encoded>`
+	// and parses the response. Returns the first lock entry (if any). Same status / retry-after
+	// out-params as PostVerify_Once.
+	auto Get_LocksByPath_Once(
+		const FResolvedEndpoint& InEndpoint,
+		const FString&           InAuthHeader,
+		const FString&           InRepoRelativePath,
+		int32&                   OutHttpStatus,
+		int32&                   OutRetryAfterSec) -> FGitLink_Subprocess::FLfsSingleLockParse;
+
+	// Records the LFS-server identity learned from a successful `/locks/verify` page (any
+	// `owner.name` in the `ours` set). No-op if InName is empty or already cached.
+	auto Note_IdentityFromVerifyPage(
+		const FString&                                  InHostKey,
+		const FGitLink_Subprocess::FLfsLocksSnapshot&   InPage) -> void;
+
 	// Returns true if a recent 429 told us to back off this host until some future time.
 	// Used to short-circuit Request_LocksVerify before issuing a doomed HTTP call.
 	auto Is_HostInBackoff(const FString& InHostKey) const -> bool;
@@ -138,4 +195,11 @@ private:
 	// Bounded growth: one entry per LFS host (typically 1–2 in practice).
 	mutable FCriticalSection            _BackoffLock;
 	TMap<FString, double>               _BackoffUntilByHost;
+
+	// Stage B — LFS-server identity per host key. Learned lazily on the first successful
+	// /locks/verify response that included a non-empty `ours` array; the corresponding
+	// `owner.name` IS our LFS-server identity. Used by the single-file path to classify
+	// `Locked` vs `LockedOther` since /locks?path=... doesn't pre-classify.
+	mutable FCriticalSection            _IdentityLock;
+	TMap<FString, FString>              _IdentityByHost;
 };

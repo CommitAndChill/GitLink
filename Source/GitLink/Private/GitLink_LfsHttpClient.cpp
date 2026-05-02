@@ -8,7 +8,9 @@
 #include <HttpModule.h>
 #include <Interfaces/IHttpRequest.h>
 #include <Interfaces/IHttpResponse.h>
+#include <GenericPlatform/GenericPlatformHttp.h>
 #include <Misc/Base64.h>
+#include <Misc/Paths.h>
 
 // --------------------------------------------------------------------------------------------------------------------
 
@@ -196,6 +198,27 @@ namespace gitlink::lfs_http::detail
 			else if (Key == TEXT("password")) { OutPass = Value; }
 		}
 		return !OutPass.IsEmpty();   // username may legitimately be empty for token-only flows
+	}
+
+	auto Extract_IdentityFromVerifyPage(
+		const FGitLink_Subprocess::FLfsLocksSnapshot& InPage, FString& OutName) -> bool
+	{
+		// Only trust pages that parsed cleanly. An empty `ours` set is unhelpful (no signal
+		// — we may genuinely hold no locks on this host yet); in that case the next successful
+		// verify will fill it in.
+		if (!InPage.bSuccess || InPage.OursPaths.Num() == 0)
+		{ return false; }
+
+		for (const FString& OursPath : InPage.OursPaths)
+		{
+			const FString* Owner = InPage.AllLocks.Find(OursPath);
+			if (Owner != nullptr && !Owner->IsEmpty())
+			{
+				OutName = *Owner;
+				return true;
+			}
+		}
+		return false;
 	}
 
 	auto Parse_RetryAfterSeconds(const FString& InHeaderValue, int32 InDefaultSec) -> int32
@@ -604,6 +627,12 @@ auto FGitLink_LfsHttpClient::Request_LocksVerify(const FString& InRepoRoot)
 		Out.AllLocks.Append(Page.AllLocks);
 		Out.OursPaths.Append(Page.OursPaths);
 
+		// Stage B — opportunistically learn the LFS-server identity for this host from any
+		// successful page that contains an `ours` entry. This is the only way to correctly
+		// classify Locked vs LockedOther on the cheaper `GET /locks?path=...` single-file
+		// path, which doesn't pre-classify.
+		Note_IdentityFromVerifyPage(Endpoint.HostKey, Page);
+
 		// Pagination — Parse_LfsVerifyJson doesn't currently surface next_cursor. For the
 		// moment we treat the response as single-page; cursor support is a v2 if we ever see
 		// pagination at our lock counts. Break unconditionally.
@@ -618,5 +647,288 @@ auto FGitLink_LfsHttpClient::Request_LocksVerify(const FString& InRepoRoot)
 		Out.OursPaths.Reset();
 	}
 
+	return Out;
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+// Stage B — single-file lock probe path. Reuses the auth cache, 429 backoff, sync-wait pattern,
+// and rate-limit telemetry of the verify path; the only differences are the verb (GET), the URL
+// shape (?path=<rel>), the response shape (raw `locks` array — no ours/theirs split), and the
+// classification step (compare owner.name to the cached LFS-server identity).
+// --------------------------------------------------------------------------------------------------------------------
+
+auto FGitLink_LfsHttpClient::Note_IdentityFromVerifyPage(
+	const FString&                                  InHostKey,
+	const FGitLink_Subprocess::FLfsLocksSnapshot&   InPage) -> void
+{
+	// Cheap fast path — already learned, don't bother walking the page.
+	{
+		FScopeLock Lock(&_IdentityLock);
+		if (_IdentityByHost.Contains(InHostKey))
+		{ return; }
+	}
+
+	FString LearnedName;
+	if (!gitlink::lfs_http::detail::Extract_IdentityFromVerifyPage(InPage, LearnedName))
+	{ return; }
+
+	{
+		FScopeLock Lock(&_IdentityLock);
+		// Re-check under the lock — another worker may have learned the identity in between.
+		if (_IdentityByHost.Contains(InHostKey))
+		{ return; }
+		_IdentityByHost.Add(InHostKey, LearnedName);
+	}
+
+	UE_LOG(LogGitLink, Log,
+		TEXT("LfsHttpClient: learned LFS-server identity for host '%s' = '%s'"),
+		*InHostKey, *LearnedName);
+}
+
+auto FGitLink_LfsHttpClient::Get_IdentityForHost(const FString& InHostKey) const -> FString
+{
+	FScopeLock Lock(&_IdentityLock);
+	const FString* Found = _IdentityByHost.Find(InHostKey);
+	return Found != nullptr ? *Found : FString();
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+
+auto FGitLink_LfsHttpClient::Get_LocksByPath_Once(
+	const FResolvedEndpoint& InEndpoint,
+	const FString&           InAuthHeader,
+	const FString&           InRepoRelativePath,
+	int32&                   OutHttpStatus,
+	int32&                   OutRetryAfterSec) -> FGitLink_Subprocess::FLfsSingleLockParse
+{
+	OutHttpStatus    = -1;
+	OutRetryAfterSec = 0;
+	FGitLink_Subprocess::FLfsSingleLockParse Out;
+
+	const FString EncodedPath = FGenericPlatformHttp::UrlEncode(InRepoRelativePath);
+	const FString FullUrl = FString::Printf(TEXT("%s/locks?path=%s"),
+		*InEndpoint.LfsUrl, *EncodedPath);
+
+	struct FCompletion
+	{
+		FEvent*  Done             = nullptr;
+		FString  ResponseBody;
+		FString  RateLimitRemaining;
+		FString  RetryAfter;
+		int32    HttpStatus       = -1;
+		bool     bSuccess         = false;
+
+		~FCompletion()
+		{
+			if (Done != nullptr)
+			{ FPlatformProcess::ReturnSynchEventToPool(Done); }
+		}
+	};
+	const TSharedRef<FCompletion> State = MakeShared<FCompletion>();
+	State->Done = FPlatformProcess::GetSynchEventFromPool(/*bIsManualReset=*/ false);
+
+	const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Req = FHttpModule::Get().CreateRequest();
+	Req->SetURL(FullUrl);
+	Req->SetVerb(TEXT("GET"));
+	Req->SetHeader(TEXT("Accept"),        TEXT("application/vnd.git-lfs+json"));
+	Req->SetHeader(TEXT("Authorization"), InAuthHeader);
+	Req->SetTimeout(kRequestTimeoutSec);
+	Req->OnProcessRequestComplete().BindLambda(
+		[State](FHttpRequestPtr /*InReq*/, FHttpResponsePtr InResp, bool bInSuccess)
+		{
+			State->bSuccess = bInSuccess && InResp.IsValid();
+			if (InResp.IsValid())
+			{
+				State->HttpStatus         = InResp->GetResponseCode();
+				State->ResponseBody       = InResp->GetContentAsString();
+				State->RateLimitRemaining = InResp->GetHeader(TEXT("X-RateLimit-Remaining"));
+				State->RetryAfter         = InResp->GetHeader(TEXT("Retry-After"));
+			}
+			State->Done->Trigger();
+		});
+
+	if (!Req->ProcessRequest())
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("LfsHttpClient: ProcessRequest() returned false for '%s'"), *FullUrl);
+		return Out;
+	}
+
+	const bool bSignaled = State->Done->Wait(FTimespan::FromSeconds(kRequestTimeoutSec + 2.0));
+
+	if (!bSignaled)
+	{
+		Req->CancelRequest();
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("LfsHttpClient: timeout waiting for '%s'"), *FullUrl);
+		return Out;
+	}
+
+	OutHttpStatus = State->HttpStatus;
+
+	// Same one-shot rate-limit warning as the verify path. The static warning flag is per-process,
+	// so a single warning will be emitted regardless of which path tripped it.
+	if (!State->RateLimitRemaining.IsEmpty() && State->RateLimitRemaining.IsNumeric())
+	{
+		const int32 Remaining = FCString::Atoi(*State->RateLimitRemaining);
+		static FThreadSafeBool bWarnedLowBudget = false;
+		if (Remaining < kRateLimitWarnThreshold && !bWarnedLowBudget.AtomicSet(true))
+		{
+			UE_LOG(LogGitLink, Warning,
+				TEXT("LfsHttpClient: LFS rate-limit budget low — %d remaining (host '%s'). ")
+				TEXT("If this persists, set r.GitLink.LfsHttp 0 to fall back to subprocess polling."),
+				Remaining, *InEndpoint.HostKey);
+		}
+	}
+
+	OutRetryAfterSec = gitlink::lfs_http::detail::Parse_RetryAfterSeconds(
+		State->RetryAfter, kDefault429BackoffSec);
+
+	if (!State->bSuccess || State->HttpStatus < 200 || State->HttpStatus >= 300)
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("LfsHttpClient: '%s' returned HTTP %d (success=%s)"),
+			*FullUrl, State->HttpStatus, State->bSuccess ? TEXT("true") : TEXT("false"));
+		return Out;
+	}
+
+	Out = FGitLink_Subprocess::Parse_LocksByPathJson(State->ResponseBody);
+	return Out;
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+
+auto FGitLink_LfsHttpClient::Request_SingleFileLock(
+	const FString& InRepoRoot,
+	const FString& InAbsolutePath) -> FSingleFileLockResult
+{
+	FSingleFileLockResult Out;
+
+	if (InRepoRoot.IsEmpty() || InAbsolutePath.IsEmpty())
+	{ return Out; }
+
+	FResolvedEndpoint Endpoint;
+	{
+		FScopeLock Lock(&_EndpointsLock);
+		const FResolvedEndpoint* Found = _EndpointsByRepo.Find(InRepoRoot);
+		if (Found == nullptr)
+		{
+			UE_LOG(LogGitLink, Verbose,
+				TEXT("LfsHttpClient: no resolved endpoint for '%s' — single-file probe skipped"),
+				*InRepoRoot);
+			return Out;
+		}
+		Endpoint = *Found;
+	}
+
+	if (Is_HostInBackoff(Endpoint.HostKey))
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("LfsHttpClient: skipping single-file probe — host '%s' in 429 backoff"),
+			*Endpoint.HostKey);
+		return Out;
+	}
+
+	// Compute repo-relative forward-slashed path. The LFS server stores paths in this form;
+	// MakePathRelativeTo expects both sides forward-slashed and returns the same.
+	FString RelPath = InAbsolutePath;
+	FString RepoRoot = InRepoRoot;
+	FPaths::NormalizeFilename(RelPath);
+	FPaths::NormalizeFilename(RepoRoot);
+	if (!RepoRoot.EndsWith(TEXT("/"))) { RepoRoot += TEXT("/"); }
+	if (!FPaths::MakePathRelativeTo(RelPath, *RepoRoot))
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("LfsHttpClient: '%s' is not under repo root '%s' — single-file probe skipped"),
+			*InAbsolutePath, *InRepoRoot);
+		return Out;
+	}
+	if (RelPath.IsEmpty())
+	{ return Out; }
+
+	FString AuthHeader = Get_BasicAuthHeader(Endpoint.HostKey);
+	if (AuthHeader.IsEmpty())
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("LfsHttpClient: no credential for '%s' — single-file probe skipped"),
+			*Endpoint.HostKey);
+		return Out;
+	}
+
+	bool bRetriedAuth = false;
+	FGitLink_Subprocess::FLfsSingleLockParse Parse;
+	int32 HttpStatus    = -1;
+	int32 RetryAfterSec = 0;
+
+	for (int32 Attempt = 0; Attempt < 2; ++Attempt)
+	{
+		Parse = Get_LocksByPath_Once(Endpoint, AuthHeader, RelPath, HttpStatus, RetryAfterSec);
+
+		if (HttpStatus == 429)
+		{
+			const int32 BackoffSec = RetryAfterSec > 0 ? RetryAfterSec : kDefault429BackoffSec;
+			Set_HostBackoff(Endpoint.HostKey, BackoffSec);
+			UE_LOG(LogGitLink, Warning,
+				TEXT("LfsHttpClient: host '%s' returned 429 on single-file probe — backing off %d s"),
+				*Endpoint.HostKey, BackoffSec);
+			return Out;
+		}
+
+		if (HttpStatus == 401 && !bRetriedAuth)
+		{
+			Invalidate_CredentialForHost(Endpoint.HostKey);
+			AuthHeader = Get_BasicAuthHeader(Endpoint.HostKey);
+			bRetriedAuth = true;
+			if (AuthHeader.IsEmpty())
+			{ return Out; }
+			continue;
+		}
+
+		break;
+	}
+
+	// HTTP query succeeded iff we got a 2xx. An empty `locks` array on a 2xx is a real
+	// "no lock exists for this path" answer — that's bSuccess=true with NotLocked.
+	if (HttpStatus < 200 || HttpStatus >= 300)
+	{ return Out; }
+
+	if (!Parse.bFoundLock)
+	{
+		// "No lock for this path" — safe to apply (LockedOther → NotLocked teammate-released
+		// transition). bSuccess=true so the caller updates the cache; an empty owner won't
+		// be confused for a positive lock answer because Lock=NotLocked.
+		Out.bSuccess = true;
+		Out.Lock     = EGitLink_LockState::NotLocked;
+		return Out;
+	}
+
+	// Probe found a lock. Classify Locked-by-us vs LockedOther by comparing owner.name to the
+	// cached LFS-server identity. If identity isn't learned yet — which happens on cold start
+	// before the first /locks/verify sweep populates it — we genuinely can't classify, so
+	// return bSuccess=false. The caller (Request_LockRefreshForFile) treats that as "no
+	// answer" and leaves the cache alone; the next sweep will fix things.
+	//
+	// v0.3.0 used a pessimistic LockedOther fallback here, on the theory that "user attempts
+	// checkout of a file shown as LockedOther → server lets them" is better than the inverse.
+	// In practice it produced a worse cold-start UX: the asset-opened/focus delegates fired
+	// probes for our own locked files within milliseconds of editor start, before the sweep
+	// could learn identity, and the cache was briefly populated with LockedOther+our-name —
+	// confusing "locked by Matiaus (= me)" entries that flipped to Locked once the sweep
+	// caught up. Returning bSuccess=false trades freshness during the cold-start window for
+	// correctness; the sweep is still bounded by the 120 s interval, and the editor delegates
+	// catch up as soon as identity is learned.
+	const FString CachedIdentity = Get_IdentityForHost(Endpoint.HostKey);
+	if (CachedIdentity.IsEmpty())
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("LfsHttpClient: probe found lock but identity for host '%s' isn't learned yet — deferring classification to next sweep"),
+			*Endpoint.HostKey);
+		return Out;  // bSuccess stays false; caller leaves cache alone
+	}
+
+	const bool bIsOurs = Parse.OwnerName.Equals(CachedIdentity, ESearchCase::IgnoreCase);
+	Out.bSuccess  = true;
+	Out.Lock      = bIsOurs ? EGitLink_LockState::Locked : EGitLink_LockState::LockedOther;
+	Out.LockOwner = Parse.OwnerName;
 	return Out;
 }

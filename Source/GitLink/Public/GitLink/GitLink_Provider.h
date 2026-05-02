@@ -192,6 +192,14 @@ public:
 	// PackageSavedWithContext hook to get sub-2-second View Changes refresh.
 	auto Request_ImmediatePoll() -> void;
 
+	// Stage B — async single-file LFS lock refresh, fired by editor delegates (focus,
+	// asset-opened, package-dirtied) and by the explicit-file-list pre-checkout path.
+	// Drops out fast for non-lockable / outside-repo / untracked-submodule files. Per-path
+	// debounce (kSingleFileRefreshDebounceSec) prevents thundering herd when many files
+	// signal at once. The HTTP probe runs on a background thread; cache mutation +
+	// OnSourceControlStateChanged dispatch happen on the game thread.
+	auto Request_LockRefreshForFile(const FString& InAbsolutePath) -> void;
+
 private:
 	// Opens the libgit2 repository at ProjectDir (or the configured override) and caches the
 	// user / branch / remote metadata. Called from Init(true).
@@ -243,6 +251,18 @@ private:
 
 	FSourceControlStateChanged _OnSourceControlStateChanged;
 	FDelegateHandle _PackageSavedHandle;
+
+	// Stage B — editor signal delegate handles for single-file LFS lock refresh. Bound in
+	// CheckRepositoryStatus, unbound in Close.
+	FDelegateHandle _AppActivationHandle;     // FSlateApplication::OnApplicationActivationStateChanged
+	FDelegateHandle _AssetEditorOpenedHandle; // UAssetEditorSubsystem::OnAssetOpenedInEditor
+	FDelegateHandle _PackageDirtiedHandle;    // UPackage::PackageMarkedDirtyEvent
+
+	// Per-path debounce for single-file LFS lock refreshes. Maps absolute path → wall-clock
+	// seconds of the last refresh. Pruned only on Close (entries are tiny and the editor's
+	// open-asset working set is bounded). Lock ordering: standalone, no nesting.
+	mutable FCriticalSection _LockRefreshDebounceLock;
+	TMap<FString, double>    _LastLockRefreshSec;
 
 	mutable FCriticalSection _LastErrorsLock;
 	TArray<FText> _LastErrors;
