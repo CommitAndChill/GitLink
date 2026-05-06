@@ -317,7 +317,16 @@ namespace gitlink::cmd
 			}
 
 			for (const FString& Abs : Batch.AbsoluteFiles)
-			{ Outcome.Released.Add(Abs); }
+			{
+				Outcome.Released.Add(Abs);
+
+				// Suppress the LFS-replica-lag race: the dispatcher's immediate poll fires
+				// Cmd_UpdateStatus right after the calling command returns, and a stale
+				// /locks/verify response would otherwise re-promote our just-released file
+				// to Lock=Locked, leaving the editor's lock indicator sticky until the next
+				// full sweep ~120s later.
+				InCtx.Provider.Note_LocalLockOp(Abs);
+			}
 
 			UE_LOG(LogGitLink, Log,
 				TEXT("Release_LfsLocksBestEffort: unlocked %d file(s) in %s"),

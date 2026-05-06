@@ -507,6 +507,56 @@ auto FGitLink_Provider::Request_ImmediatePoll() -> void
 
 namespace
 {
+	// Window during which a locally-completed lock/unlock op is treated as authoritative
+	// over the LFS server's `/locks/verify` response. GitHub's LFS read replicas typically
+	// converge in under a second, but spikes of several seconds are observed under load —
+	// 30s is conservative and bounded (entries are pruned opportunistically once the map
+	// exceeds 64 entries, and any path will naturally re-enter the cache via the next
+	// successful sweep once the window passes).
+	constexpr double kRecentLocalLockOpGuardSec = 30.0;
+
+	auto NormalizeAbsForGuard(const FString& InPath) -> FString
+	{
+		FString Out = FPaths::ConvertRelativePathToFull(InPath);
+		FPaths::NormalizeFilename(Out);
+		return Out;
+	}
+}
+
+auto FGitLink_Provider::Note_LocalLockOp(const FString& InAbsolutePath) -> void
+{
+	const FString Key = NormalizeAbsForGuard(InAbsolutePath);
+	const double  Now = FPlatformTime::Seconds();
+
+	FScopeLock Lock(&_RecentLocalLockOpsLock);
+	_RecentLocalLockOps.Add(Key, Now);
+
+	// Opportunistic prune of expired entries once the map drifts beyond a sensible size.
+	// In normal use the map carries at most the size of the user's last batch op (a handful
+	// of files); the threshold protects against pathological cases (e.g. mass-revert).
+	if (_RecentLocalLockOps.Num() > 64)
+	{
+		for (auto It = _RecentLocalLockOps.CreateIterator(); It; ++It)
+		{
+			if (Now - It->Value > kRecentLocalLockOpGuardSec)
+			{ It.RemoveCurrent(); }
+		}
+	}
+}
+
+auto FGitLink_Provider::Was_RecentLocalLockOp(const FString& InAbsolutePath) const -> bool
+{
+	const FString Key = NormalizeAbsForGuard(InAbsolutePath);
+	const double  Now = FPlatformTime::Seconds();
+
+	FScopeLock Lock(&_RecentLocalLockOpsLock);
+	if (const double* Stamped = _RecentLocalLockOps.Find(Key))
+	{ return Now - *Stamped <= kRecentLocalLockOpGuardSec; }
+	return false;
+}
+
+namespace
+{
 	// 2 seconds matches the foreground freshness target. A user opening 50 tabs in a burst
 	// (Alt-Tab → all open editors signal at once) shouldn't fire 50 simultaneous HTTPs; the
 	// debounce collapses repeated signals for the same path into one probe, while letting

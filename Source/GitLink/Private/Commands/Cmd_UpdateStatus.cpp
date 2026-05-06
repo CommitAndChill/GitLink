@@ -411,6 +411,13 @@ namespace gitlink::cmd
 
 				for (const auto& [Absolute, LockOwner] : RemoteLocksAbs)
 				{
+					// Replica-lag guard: if we just locked or unlocked this file locally
+					// within the last ~30s, the cache's lock state is locally-authoritative.
+					// A stale /locks/verify response (from before the LFS server's read replica
+					// has caught up to our write) must not be allowed to flip the state back.
+					if (InCtx.Provider.Was_RecentLocalLockOp(Absolute))
+					{ continue; }
+
 					const bool bIsOurs = OursAbs.Contains(Absolute);
 					const EGitLink_LockState NewLockState = bIsOurs
 						? EGitLink_LockState::Locked
@@ -478,6 +485,13 @@ namespace gitlink::cmd
 				for (const FGitLink_FileStateRef& Cached : LockedStates)
 				{
 					if (RemoteLockAbsoluteSet.Contains(Cached->GetFilename()))
+					{ continue; }
+
+					// Replica-lag guard: same rationale as the lock-stamping path above.
+					// If we just locked the file locally and the server's response hasn't
+					// caught up yet, the file appears absent from RemoteLockAbsoluteSet —
+					// without this guard the cache would be cleared back to NotLocked.
+					if (InCtx.Provider.Was_RecentLocalLockOp(Cached->GetFilename()))
 					{ continue; }
 
 					// Determine which repo this cached file belongs to and confirm we polled
