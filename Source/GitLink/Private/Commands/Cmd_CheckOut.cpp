@@ -125,6 +125,11 @@ namespace gitlink::cmd
 				Composite.bInSubmodule  = Batch.bIsSubmodule;
 
 				Result.UpdatedStates.Add(Make_FileState(Normalize_AbsolutePath(Absolute), Composite));
+
+				// Suppress the LFS-replica-lag race: the dispatcher's immediate poll fires
+				// Cmd_UpdateStatus right after we return, and a stale /locks/verify response
+				// would otherwise demote our just-locked file back to NotLocked.
+				InCtx.Provider.Note_LocalLockOp(Absolute);
 			}
 
 			TotalLocked += Batch.RelativeFiles.Num();

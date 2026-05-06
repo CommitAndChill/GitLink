@@ -200,6 +200,22 @@ public:
 	// OnSourceControlStateChanged dispatch happen on the game thread.
 	auto Request_LockRefreshForFile(const FString& InAbsolutePath) -> void;
 
+	// Records that a local lock-state-changing op just succeeded for this file
+	// (Cmd_CheckOut → Locked, or Cmd_Revert/CheckIn/Delete unlock → NotLocked).
+	// `Was_RecentLocalLockOp` returns true for ~30s after, and Cmd_UpdateStatus's
+	// full-scan refuses to overwrite the cache's lock state for guarded paths.
+	//
+	// Why: GitHub's LFS read replicas can lag a local lock/unlock by 10–100ms+.
+	// The dispatcher's `Request_ImmediatePoll()` fires `Cmd_UpdateStatus` right
+	// after our command returns; without this guard a stale `/locks/verify`
+	// response either re-promotes our just-released file to Lock=Locked or
+	// demotes our just-locked file to Lock=NotLocked, producing a visible flicker
+	// (and in Revert's case a sticky lock indicator until the next sweep).
+	//
+	// Symmetric to v0.3.2's single-file-probe guard but at the full-scan level.
+	auto Note_LocalLockOp     (const FString& InAbsolutePath)       -> void;
+	auto Was_RecentLocalLockOp(const FString& InAbsolutePath) const -> bool;
+
 private:
 	// Opens the libgit2 repository at ProjectDir (or the configured override) and caches the
 	// user / branch / remote metadata. Called from Init(true).
@@ -263,6 +279,13 @@ private:
 	// open-asset working set is bounded). Lock ordering: standalone, no nesting.
 	mutable FCriticalSection _LockRefreshDebounceLock;
 	TMap<FString, double>    _LastLockRefreshSec;
+
+	// Recently-completed local lock ops (Cmd_CheckOut lock or unlock from Revert/CheckIn/Delete).
+	// Keyed by Normalize_AbsolutePath form. Value is FPlatformTime::Seconds() at op completion.
+	// Consulted by Cmd_UpdateStatus's full-scan lock merge to suppress the LFS-replica-lag race.
+	// See Note_LocalLockOp / Was_RecentLocalLockOp above. Window is currently 30s.
+	mutable FCriticalSection _RecentLocalLockOpsLock;
+	TMap<FString, double>    _RecentLocalLockOps;
 
 	mutable FCriticalSection _LastErrorsLock;
 	TArray<FText> _LastErrors;
