@@ -1,5 +1,6 @@
 #include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
+#include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
@@ -48,6 +49,37 @@ namespace gitlink::cmd
 			}
 
 			return InRepo.DiscardChanges(InRepoRelative);
+		}
+
+		// Re-runs the LFS smudge filter for the given repo-relative paths against the given cwd
+		// (empty = parent repo, submodule root = submodule). libgit2's git_checkout_head does NOT
+		// run Git's smudge filters, so without this call any LFS-tracked file lands as its
+		// 132-byte pointer text instead of the real binary — Unreal then fails to load the asset
+		// and (if it was open) kicks the user to the default level. `git lfs checkout` is a
+		// no-op for non-LFS paths and idempotent for already-materialized LFS files; safe to
+		// call unconditionally on the discarded path set.
+		auto RehydrateLfsForRepo(
+			FCommandContext&        InCtx,
+			const FString&          InCwdOverride,
+			const TArray<FString>&  InRepoRelative) -> void
+		{
+			if (InRepoRelative.IsEmpty() || InCtx.Subprocess == nullptr || !InCtx.Subprocess->IsValid())
+			{ return; }
+
+			TArray<FString> Args;
+			Args.Reserve(InRepoRelative.Num() + 2);
+			Args.Add(TEXT("checkout"));
+			Args.Add(TEXT("--"));
+			for (const FString& Rel : InRepoRelative)
+			{ Args.Add(Rel); }
+
+			const FGitLink_SubprocessResult Result = InCtx.Subprocess->RunLfs(Args, InCwdOverride);
+			if (!Result.IsSuccess())
+			{
+				UE_LOG(LogGitLink, Warning,
+					TEXT("Cmd_Revert: 'git lfs checkout' rehydration returned %d (cwd='%s'): %s"),
+					Result.ExitCode, *InCwdOverride, *Result.StdErr);
+			}
 		}
 	}
 
@@ -135,6 +167,8 @@ namespace gitlink::cmd
 					TEXT("Cmd_Revert: outer DiscardChanges failed: %s"), *DiscardRes.ErrorMessage);
 				return FCommandResult::Fail(FText::FromString(DiscardRes.ErrorMessage));
 			}
+
+			RehydrateLfsForRepo(InCtx, FString(), RelativeModified);
 		}
 
 		// Each submodule bucket: open inner repo, discard there.
@@ -168,6 +202,8 @@ namespace gitlink::cmd
 					*SubmoduleRoot, *SubDiscardRes.ErrorMessage);
 				return FCommandResult::Fail(FText::FromString(SubDiscardRes.ErrorMessage));
 			}
+
+			RehydrateLfsForRepo(InCtx, SubmoduleRoot, SubRelative);
 		}
 
 		// Release any LFS locks we held — Release_LfsLocksBestEffort partitions by repo so
