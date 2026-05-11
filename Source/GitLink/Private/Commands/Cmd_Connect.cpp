@@ -188,18 +188,24 @@ namespace gitlink::cmd
 			TArray<FGitLink_Subprocess::FLfsLocksSnapshot> Snapshots;
 			Snapshots.SetNum(RepoPolls.Num());
 
-			const bool bUseHttp = gitlink::lfs_http::Is_Enabled()
-				&& InCtx.Provider.Get_LfsHttpClient() != nullptr;
+			// Snapshot the LFS client + subprocess handles before fanning out — same rationale as
+			// Cmd_UpdateStatus. The raw-pointer pattern previously crashed in TScopeLock when
+			// `FGitLink_Provider::Close()` (Init(force=true) tear-down) fired while a worker was
+			// mid-deref. TSharedPtr locals keep the objects alive for the parallel-for duration.
+			// See v0.3.6 in CLAUDE.md Version log.
+			const TSharedPtr<FGitLink_LfsHttpClient> LfsClient = InCtx.Provider.Get_LfsHttpClient();
+			const TSharedPtr<FGitLink_Subprocess>    Subprocess = InCtx.Subprocess;
+			const bool bUseHttp = gitlink::lfs_http::Is_Enabled() && LfsClient.IsValid();
 
 			ParallelFor_BoundedConcurrency(RepoPolls.Num(), GMaxConcurrentRepoWorkers, [&](int32 Idx)
 			{
 				const FString& RepoRoot = RepoPolls[Idx].Key;
-				if (bUseHttp && InCtx.Provider.Get_LfsHttpClient()->Has_LfsUrl(RepoRoot))
+				if (bUseHttp && LfsClient->Has_LfsUrl(RepoRoot))
 				{
-					Snapshots[Idx] = InCtx.Provider.Get_LfsHttpClient()->Request_LocksVerify(RepoRoot);
+					Snapshots[Idx] = LfsClient->Request_LocksVerify(RepoRoot);
 					if (Snapshots[Idx].bSuccess) { return; }
 				}
-				Snapshots[Idx] = InCtx.Subprocess->QueryLfsLocks_Verified(RepoPolls[Idx].Value);
+				Snapshots[Idx] = Subprocess->QueryLfsLocks_Verified(RepoPolls[Idx].Value);
 			});
 
 			for (int32 Idx = 0; Idx < RepoPolls.Num(); ++Idx)

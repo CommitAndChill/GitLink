@@ -71,7 +71,11 @@ namespace gitlink::lfs_http
 // poll), so the worker waits on an FEvent until completion or a 10 s timeout.
 // --------------------------------------------------------------------------------------------------------------------
 
-class FGitLink_LfsHttpClient
+// GITLINK_API is required so the test module (GitLinkTests) can construct and call into this
+// class across the DLL boundary — same treatment FGitLink_Subprocess gets. Without it, tests
+// that instantiate the client (e.g. Test_LfsClientLifetime_*) hit LNK2019 on the ctor and
+// Has_LfsUrl. Symmetric with FGitLink_Subprocess.h.
+class GITLINK_API FGitLink_LfsHttpClient
 {
 public:
 	// InSubprocess is borrowed for one-shot `git config` / `git credential fill` invocations

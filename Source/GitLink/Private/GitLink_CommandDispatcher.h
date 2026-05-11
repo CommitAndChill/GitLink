@@ -36,7 +36,15 @@ namespace gitlink::cmd
 		FGitLink_Provider&    Provider;
 		FGitLink_StateCache&  StateCache;
 		gitlink::FRepository* Repository;  // may be nullptr if the repo isn't open yet (e.g. during Connect)
-		FGitLink_Subprocess*  Subprocess;  // may be nullptr if no git binary configured / Close()d
+
+		// Snapshot of the provider's subprocess handle. Held by-value so a concurrent
+		// Init(force=true) tear-down can't free the underlying object while a command is mid-
+		// execution (in particular, while a ParallelFor body is fanned out across workers).
+		// Use `Subprocess->...` (operator-> on TSharedPtr) or `!Subprocess.IsValid()` to test;
+		// `Subprocess == nullptr` also works because TSharedPtr has a nullptr comparison.
+		// May be unset if no git binary is configured or the provider was Close()'d before this
+		// context was built. See v0.3.6 entry in CLAUDE.md Version log.
+		TSharedPtr<FGitLink_Subprocess> Subprocess;
 
 		// Absolute path to the repository working tree root — copied from the provider so command
 		// handlers don't need to take the provider lock to read it.

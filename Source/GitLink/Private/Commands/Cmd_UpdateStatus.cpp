@@ -375,21 +375,30 @@ namespace gitlink::cmd
 				TArray<FGitLink_Subprocess::FLfsLocksSnapshot> Snapshots;
 				Snapshots.SetNum(RepoPolls.Num());
 
-				const bool bUseHttp = gitlink::lfs_http::Is_Enabled()
-					&& InCtx.Provider.Get_LfsHttpClient() != nullptr;
+				// Snapshot the LFS client + subprocess handles before fanning out. Worker threads
+				// must NOT re-fetch via `InCtx.Provider.Get_LfsHttpClient()` mid-loop — a
+				// concurrent `FGitLink_Provider::Close()` (fired by editor `Init(force=true)` or
+				// re-init) resets the provider's TSharedPtr, and a worker dereferencing a stale
+				// raw pointer crashed in `TScopeLock`'s ctor on `_EndpointsLock`. The local
+				// snapshots here participate in TSharedPtr's refcount so the underlying objects
+				// outlive every worker for the duration of this ParallelFor (which is blocking
+				// on the calling task thread). See v0.3.6 in CLAUDE.md Version log.
+				const TSharedPtr<FGitLink_LfsHttpClient> LfsClient = InCtx.Provider.Get_LfsHttpClient();
+				const TSharedPtr<FGitLink_Subprocess>    Subprocess = InCtx.Subprocess;
+				const bool bUseHttp = gitlink::lfs_http::Is_Enabled() && LfsClient.IsValid();
 
 				ParallelFor_BoundedConcurrency(RepoPolls.Num(), GMaxConcurrentRepoWorkers, [&](int32 Idx)
 				{
 					const FString& RepoRoot = RepoPolls[Idx].Key;
-					if (bUseHttp && InCtx.Provider.Get_LfsHttpClient()->Has_LfsUrl(RepoRoot))
+					if (bUseHttp && LfsClient->Has_LfsUrl(RepoRoot))
 					{
-						Snapshots[Idx] = InCtx.Provider.Get_LfsHttpClient()->Request_LocksVerify(RepoRoot);
+						Snapshots[Idx] = LfsClient->Request_LocksVerify(RepoRoot);
 						if (Snapshots[Idx].bSuccess) { return; }
 						// HTTP path failed (transport / 401 / etc.) — fall through to subprocess
 						// for this repo. This keeps a single repo's auth misconfiguration from
 						// poisoning the whole poll cycle.
 					}
-					Snapshots[Idx] = InCtx.Subprocess->QueryLfsLocks_Verified(RepoPolls[Idx].Value);
+					Snapshots[Idx] = Subprocess->QueryLfsLocks_Verified(RepoPolls[Idx].Value);
 				});
 
 				for (int32 Idx = 0; Idx < RepoPolls.Num(); ++Idx)
@@ -564,7 +573,7 @@ namespace gitlink::cmd
 			//      Stage A baseline.
 			if (gitlink::lfs_http::Is_Enabled()
 				&& InCtx.Provider.Is_LfsAvailable()
-				&& InCtx.Provider.Get_LfsHttpClient() != nullptr)
+				&& InCtx.Provider.Get_LfsHttpClient().IsValid())
 			{
 				for (const FString& RequestedRaw : InFiles)
 				{
