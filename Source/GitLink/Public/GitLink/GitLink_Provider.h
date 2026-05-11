@@ -124,12 +124,16 @@ public:
 
 	auto Get_StateCache() -> FGitLink_StateCache&;
 	auto Get_Repository() const -> gitlink::FRepository*;
-	auto Get_Subprocess() const -> FGitLink_Subprocess*;
 
-	// In-process LFS HTTP client. Present once a repo is open. Replaces per-poll
-	// `git lfs locks --verify --json` subprocesses for the steady-state background poll —
-	// see GitLink_LfsHttpClient.h for rationale. Gated by the `r.GitLink.LfsHttp` CVar.
-	auto Get_LfsHttpClient() const -> FGitLink_LfsHttpClient*;
+	// Subprocess + LFS HTTP client accessors return shared ownership handles. The provider is
+	// the primary owner (constructed in CheckRepositoryStatus, dropped in Close) but commands
+	// that fan their bodies out across worker threads (Cmd_UpdateStatus, Cmd_Connect) must
+	// snapshot the TSharedPtr into a local *before* the parallel-for so an `Init(force=true)`
+	// teardown mid-sweep can't free the underlying object while a worker is dereferencing it.
+	// Returning a raw pointer here previously caused a TScopeLock use-after-free crash on
+	// FGitLink_LfsHttpClient's mutex; see the v0.3.6 entry in CLAUDE.md's Version log.
+	auto Get_Subprocess()    const -> TSharedPtr<FGitLink_Subprocess>;
+	auto Get_LfsHttpClient() const -> TSharedPtr<FGitLink_LfsHttpClient>;
 
 	// True when LFS is installed (git lfs version succeeded at connect time) AND the user
 	// has bUseLfsLocking enabled in the plugin settings. Drives UsesCheckout().
@@ -228,8 +232,13 @@ private:
 	TUniquePtr<gitlink::FRepository>       _Repository;
 	TUniquePtr<FGitLink_StateCache>        _StateCache;
 	TUniquePtr<FGitLink_CommandDispatcher> _Dispatcher;  // constructed empty in Pass B
-	TUniquePtr<FGitLink_Subprocess>        _Subprocess;  // present once a repo is open
-	TUniquePtr<FGitLink_LfsHttpClient>     _LfsHttpClient;  // present once a repo is open
+	// Subprocess + LFS HTTP client are held as TSharedPtr so commands that fan out across
+	// worker threads can snapshot a refcounted handle and keep the underlying object alive
+	// across a concurrent Close() / Reset(). Provider is the primary owner; the secondary
+	// references are short-lived (one per in-flight parallel command). See Get_LfsHttpClient()
+	// comment above and the v0.3.6 entry in CLAUDE.md.
+	TSharedPtr<FGitLink_Subprocess>        _Subprocess;     // present once a repo is open
+	TSharedPtr<FGitLink_LfsHttpClient>     _LfsHttpClient;  // present once a repo is open
 	TUniquePtr<FGitLink_BackgroundPoll>    _BackgroundPoll;
 	TUniquePtr<FGitLink_Menu>              _Menu;
 

@@ -25,9 +25,12 @@ auto FGitLink_Revision::Get(FString& InOutFilename) const -> bool
 	// Access the provider to get the subprocess and repo root.
 	FGitLink_Provider& Provider = static_cast<FGitLink_Provider&>(
 		ISourceControlModule::Get().GetProvider());
-	FGitLink_Subprocess* Subprocess = Provider.Get_Subprocess();
+	// Snapshot the shared subprocess handle so it can't be Reset() out from under us mid-call
+	// (Get() then a raw-pointer deref would race against Provider::Close()). See v0.3.6 in
+	// CLAUDE.md Version log.
+	TSharedPtr<FGitLink_Subprocess> Subprocess = Provider.Get_Subprocess();
 
-	if (Subprocess == nullptr || !Subprocess->IsValid())
+	if (!Subprocess.IsValid() || !Subprocess->IsValid())
 	{
 		UE_LOG(LogGitLink, Warning, TEXT("FGitLink_Revision::Get: no subprocess available"));
 		return false;

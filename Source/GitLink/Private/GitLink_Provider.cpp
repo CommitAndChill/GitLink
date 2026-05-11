@@ -187,12 +187,14 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 	const FString GitBinary = (Settings != nullptr && !Settings->GitBinaryOverride.IsEmpty())
 		? Settings->GitBinaryOverride
 		: TEXT("git");
-	_Subprocess = MakeUnique<FGitLink_Subprocess>(GitBinary, _PathToRepositoryRoot);
+	_Subprocess = MakeShared<FGitLink_Subprocess>(GitBinary, _PathToRepositoryRoot);
 
 	// In-process LFS HTTP client — used by the background poll instead of shelling out to
 	// `git lfs locks --verify --json` per repo. Endpoint URLs are resolved per-repo below
-	// once we know the LFS-using submodule set.
-	_LfsHttpClient = MakeUnique<FGitLink_LfsHttpClient>(*_Subprocess);
+	// once we know the LFS-using submodule set. Held as TSharedPtr so a concurrent
+	// Init(force=true) tear-down can't free this from under an in-flight ParallelFor sweep
+	// (the v0.3.6 fix — see CLAUDE.md Version log).
+	_LfsHttpClient = MakeShared<FGitLink_LfsHttpClient>(*_Subprocess);
 
 	// Probe for git-lfs. If unavailable we'll still connect; UsesCheckout just stays off.
 	_bLfsAvailable = _Subprocess->IsLfsAvailable();
@@ -569,8 +571,12 @@ auto FGitLink_Provider::Request_LockRefreshForFile(const FString& InAbsolutePath
 	if (!_bGitRepositoryFound || !_bLfsAvailable)
 	{ return; }
 
-	FGitLink_LfsHttpClient* HttpClient = _LfsHttpClient.Get();
-	if (HttpClient == nullptr || !gitlink::lfs_http::Is_Enabled())
+	// Snapshot the LFS client handle. The AsyncTask below runs on a background thread and
+	// the GameThread continuation could outlive a concurrent Provider::Close() that drops
+	// the provider's reference. Capturing the TSharedPtr keeps the client alive for the
+	// duration of the chain regardless. See v0.3.6 in CLAUDE.md.
+	TSharedPtr<FGitLink_LfsHttpClient> HttpClient = _LfsHttpClient;
+	if (!HttpClient.IsValid() || !gitlink::lfs_http::Is_Enabled())
 	{ return; }
 
 	// Normalize once — used for the cache lookup, debounce key, and the HTTP repo-relative
@@ -1010,14 +1016,14 @@ auto FGitLink_Provider::Get_Repository() const -> gitlink::FRepository*
 	return _Repository.Get();
 }
 
-auto FGitLink_Provider::Get_Subprocess() const -> FGitLink_Subprocess*
+auto FGitLink_Provider::Get_Subprocess() const -> TSharedPtr<FGitLink_Subprocess>
 {
-	return _Subprocess.Get();
+	return _Subprocess;
 }
 
-auto FGitLink_Provider::Get_LfsHttpClient() const -> FGitLink_LfsHttpClient*
+auto FGitLink_Provider::Get_LfsHttpClient() const -> TSharedPtr<FGitLink_LfsHttpClient>
 {
-	return _LfsHttpClient.Get();
+	return _LfsHttpClient;
 }
 
 auto FGitLink_Provider::Is_FileLockable(const FString& InAbsolutePath) const -> bool

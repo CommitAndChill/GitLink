@@ -207,8 +207,10 @@ auto FGitLink_Menu::Push_Clicked() -> void
 	// Run git push via subprocess on a background thread — libgit2 push lacks credential wiring.
 	Async(EAsyncExecution::TaskGraph, [this]()
 	{
-		FGitLink_Subprocess* Subprocess = FGitLinkModule::Get().Get_Provider().Get_Subprocess();
-		const bool bOk = Subprocess != nullptr && Subprocess->IsValid()
+		// Snapshot the shared subprocess handle so a concurrent Provider::Close() can't free
+		// the underlying object while this background task is mid-Run(). See v0.3.6 in CLAUDE.md.
+		TSharedPtr<FGitLink_Subprocess> Subprocess = FGitLinkModule::Get().Get_Provider().Get_Subprocess();
+		const bool bOk = Subprocess.IsValid() && Subprocess->IsValid()
 			&& Subprocess->Run({ TEXT("push") }).IsSuccess();
 
 		AsyncTask(ENamedThreads::GameThread, [this, bOk]()
