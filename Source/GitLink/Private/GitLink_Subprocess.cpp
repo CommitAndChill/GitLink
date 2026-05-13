@@ -106,7 +106,14 @@ auto FGitLink_Subprocess::Run(const TArray<FString>& InArgs, const FString& InCw
 	}
 	else if (ExitCode != 0)
 	{
-		UE_LOG(LogGitLink, Warning,
+		// Non-zero exit is not inherently a problem — callers routinely use git's exit code
+		// to detect normal-case "not set / not present" outcomes (e.g. `git config --get
+		// lfs.url` exits 1 when no explicit override is configured, `git symbolic-ref HEAD`
+		// exits 1 in detached HEAD). Every caller checks IsSuccess() and reacts; if a caller
+		// considers the failure unexpected it can emit its own Warning with full context.
+		// Keep the diagnostic detail at Verbose so debugging still works without spamming
+		// the log on healthy repos.
+		UE_LOG(LogGitLink, Verbose,
 			TEXT("Subprocess: '%s %s' exited with %d: %s"),
 			*_GitBinary, *ArgsStr, ExitCode, *Result.Get_CombinedError());
 	}

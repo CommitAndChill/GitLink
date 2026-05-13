@@ -22,7 +22,7 @@
 
 // Semantic version: MAJOR.MINOR.PATCH. Bump MINOR for behavior changes, PATCH for bugfixes,
 // MAJOR when the public C++ API breaks (FGitLink_Provider/FGitLink_FileState etc.).
-#define GITLINK_VERSION TEXT("0.3.6")
+#define GITLINK_VERSION TEXT("0.3.7")
 
 // Build timestamp (ANSI string — `__DATE__` and `__TIME__` are compiler intrinsics, ANSI-only).
 // Bake into whichever TU `#include`s this header and references it; that TU's `__DATE__`/`__TIME__`
