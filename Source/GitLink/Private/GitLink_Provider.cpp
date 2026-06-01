@@ -568,6 +568,15 @@ namespace
 
 auto FGitLink_Provider::Request_LockRefreshForFile(const FString& InAbsolutePath) -> void
 {
+	// LFS lock probing is an interactive-editor feature; it has no purpose in a commandlet
+	// (e.g. the cook). Worse, scheduling the async HTTP probe in a commandlet means an in-flight
+	// request can race engine teardown — the HTTP module unloads while the background task is
+	// mid-flight, so FHttpRequestCommon::CancelRequest() -> FHttpModule::Get() trips the
+	// IsInGameThread() assert off the game thread and aborts the cook process. Skip entirely in
+	// commandlets, and once engine exit has been requested.
+	if (IsRunningCommandlet() || IsEngineExitRequested())
+	{ return; }
+
 	if (!_bGitRepositoryFound || !_bLfsAvailable)
 	{ return; }
 
@@ -624,6 +633,12 @@ auto FGitLink_Provider::Request_LockRefreshForFile(const FString& InAbsolutePath
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
 		[this, Normalized, RepoRoot, HttpClient]()
 		{
+			// The task may have been queued just before shutdown began. Touching the HTTP module
+			// during teardown (when it has unloaded) aborts on FHttpModule::Get()'s game-thread
+			// assert. Bail if exit is in progress.
+			if (IsEngineExitRequested())
+			{ return; }
+
 			const FGitLink_LfsHttpClient::FSingleFileLockResult Result =
 				HttpClient->Request_SingleFileLock(RepoRoot, Normalized);
 			if (!Result.bSuccess)
