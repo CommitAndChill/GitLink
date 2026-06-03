@@ -3,6 +3,7 @@
 #include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 
+#include <CoreGlobals.h>
 #include <HAL/IConsoleManager.h>
 #include <HAL/PlatformProcess.h>
 #include <HttpModule.h>
@@ -425,6 +426,16 @@ auto FGitLink_LfsHttpClient::PostVerify_Once(
 	OutRetryAfterSec = 0;
 	FGitLink_Subprocess::FLfsLocksSnapshot Out;
 
+	// Teardown guard. This runs on a ParallelFor worker (the Cmd_Connect Stage-3 and
+	// Cmd_UpdateStatus sweeps fan out across worker threads). Touching FHttpModule::Get()
+	// once the HTTP module has unloaded during engine exit trips its game-thread assert and
+	// aborts the process off the game thread — the same root cause v0.3.8 closed on the
+	// single-file path. Bail before CreateRequest() so neither it nor the timeout-path
+	// CancelRequest() reaches into a dead module. Callers treat the empty snapshot as "no
+	// answer" and fall back / leave the cache alone.
+	if (IsEngineExitRequested())
+	{ return Out; }
+
 	// Build request body. Per the LFS spec: `ref` is optional; `cursor` is supplied for
 	// pagination only.
 	FString Body = TEXT("{");
@@ -504,7 +515,11 @@ auto FGitLink_LfsHttpClient::PostVerify_Once(
 	{
 		// Lambda may still fire later — that's fine, the State stays alive via its captured
 		// shared-ref and the event is cleaned up by State's destructor when the lambda exits.
-		Req->CancelRequest();
+		// Skip CancelRequest() if engine exit began while we were waiting: it reaches into
+		// FHttpModule::Get(), which may have unloaded by now. Letting the request tear down via
+		// refcount is safe; cancelling into a dead module is what crashes.
+		if (!IsEngineExitRequested())
+		{ Req->CancelRequest(); }
 		UE_LOG(LogGitLink, Verbose,
 			TEXT("LfsHttpClient: timeout waiting for '%s'"), *FullUrl);
 		return Out;
@@ -705,6 +720,12 @@ auto FGitLink_LfsHttpClient::Get_LocksByPath_Once(
 	OutRetryAfterSec = 0;
 	FGitLink_Subprocess::FLfsSingleLockParse Out;
 
+	// Teardown guard — see PostVerify_Once. Request_LockRefreshForFile already guards its
+	// AsyncTask, but guard here too so every entry into the HTTP module is defended regardless
+	// of caller.
+	if (IsEngineExitRequested())
+	{ return Out; }
+
 	const FString EncodedPath = FGenericPlatformHttp::UrlEncode(InRepoRelativePath);
 	const FString FullUrl = FString::Printf(TEXT("%s/locks?path=%s"),
 		*InEndpoint.LfsUrl, *EncodedPath);
@@ -758,7 +779,9 @@ auto FGitLink_LfsHttpClient::Get_LocksByPath_Once(
 
 	if (!bSignaled)
 	{
-		Req->CancelRequest();
+		// See PostVerify_Once — don't cancel into a possibly-unloaded HTTP module during exit.
+		if (!IsEngineExitRequested())
+		{ Req->CancelRequest(); }
 		UE_LOG(LogGitLink, Verbose,
 			TEXT("LfsHttpClient: timeout waiting for '%s'"), *FullUrl);
 		return Out;
