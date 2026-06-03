@@ -7,6 +7,7 @@
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
 
+#include <CoreGlobals.h>
 #include <Misc/Paths.h>
 #include <SourceControlOperations.h>
 
@@ -199,6 +200,12 @@ namespace gitlink::cmd
 
 			ParallelFor_BoundedConcurrency(RepoPolls.Num(), GMaxConcurrentRepoWorkers, [&](int32 Idx)
 			{
+				// Don't start a doomed HTTP request if the editor is tearing down — the HTTP
+				// module may already be unloading. PostVerify_Once also guards this (the durable
+				// fix); bailing here just avoids 12 s of pointless wait per worker on exit.
+				if (IsEngineExitRequested())
+				{ return; }
+
 				const FString& RepoRoot = RepoPolls[Idx].Key;
 				if (bUseHttp && LfsClient->Has_LfsUrl(RepoRoot))
 				{
