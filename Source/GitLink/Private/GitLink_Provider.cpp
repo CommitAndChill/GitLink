@@ -82,6 +82,18 @@ auto FGitLink_Provider::Close() -> void
 {
 	UE_LOG(LogGitLink, Log, TEXT("FGitLink_Provider::Close"));
 
+	// At engine exit the module is about to destroy this provider (and its FCriticalSections) right
+	// after Close() returns. Any async command body still running on a worker thread holds a raw
+	// reference to this provider and would fault on freed state — e.g. Cmd_UpdateStatus's full-scan
+	// calling Was_RecentLocalLockOp on the now-destroyed _RecentLocalLockOpsLock (the reported
+	// teardown crash). Drain those bodies first. We gate on IsEngineExitRequested() so a routine
+	// Init(force=true) reconnect Close() — which does NOT destroy the provider — never blocks the
+	// game thread waiting on an in-flight sweep (that would be a v0.3.1-class hang). See v0.3.10.
+	if (IsEngineExitRequested() && _Dispatcher.IsValid())
+	{
+		_Dispatcher->Shutdown_AndDrain();
+	}
+
 	_BackgroundPoll.Reset();
 
 	if (_PackageSavedHandle.IsValid())

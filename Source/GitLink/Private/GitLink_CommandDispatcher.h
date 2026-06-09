@@ -8,6 +8,8 @@
 #include <ISourceControlProvider.h>
 #include <Templates/Function.h>
 
+#include <atomic>
+
 class FGitLink_Provider;
 class FGitLink_StateCache;
 class FGitLink_Subprocess;
@@ -115,6 +117,21 @@ public:
 
 	auto Tick() -> void;
 
+	// Called from FGitLink_Provider::Close() at engine exit only. Marks the dispatcher dead so any
+	// already-queued game-thread completion no-ops instead of touching the provider, then blocks
+	// until every in-flight async command BODY finishes dereferencing the provider on its worker
+	// thread. This is what makes it safe for the module to destroy the provider (and its mutexes)
+	// next: without it, an in-flight `UpdateStatus` body can fault in e.g. `Was_RecentLocalLockOp`
+	// on the provider's freed `_RecentLocalLockOpsLock` (see v0.3.10 in CLAUDE.md's Version log).
+	//
+	// Deadlock-safe: a command body never blocks on the game thread — it only ENQUEUES its
+	// game-thread completion (`AsyncTask(GameThread, ...)`) and returns — so waiting for bodies to
+	// drain from the game thread can't deadlock. We deliberately do NOT drain on a routine
+	// `Init(force=true)` reconnect Close(): the provider object survives that, so in-flight bodies
+	// stay valid, and blocking the game thread up to the ~12s LFS timeout on every reconnect would
+	// reintroduce a v0.3.1-class hang.
+	auto Shutdown_AndDrain() -> void;
+
 private:
 	// Runs the handler synchronously and merges the result into the state cache + fires the
 	// completion delegate. Safe to call from any thread — state merge is marshalled to game thread.
@@ -127,4 +144,17 @@ private:
 
 	FGitLink_Provider& _Owner;
 	TMap<FName, gitlink::cmd::FCommandFn> _Handlers;
+
+	// Liveness token shared with every in-flight async command lambda (captured BY VALUE, so the
+	// captured copy keeps the atomic alive even after this dispatcher — and the owning provider —
+	// is destroyed). `Shutdown_AndDrain()` sets it false; the game-thread completion checks it and
+	// bails before touching the (possibly freed) provider. Reading it via a captured copy never
+	// dereferences `this`, which is the whole point.
+	TSharedRef<std::atomic<bool>> _Alive = MakeShared<std::atomic<bool>>(true);
+
+	// Count of async command BODIES currently executing on worker threads — the window during which
+	// a body holds a raw reference to the provider. Incremented on the game thread before the task
+	// is launched (so a body is accounted for before `Shutdown_AndDrain()` can observe the count),
+	// decremented when the body returns. Drained by `Shutdown_AndDrain()`.
+	std::atomic<int32> _InFlightBodies{0};
 };
