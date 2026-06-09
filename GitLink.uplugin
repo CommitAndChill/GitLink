@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 12,
-	"VersionName": "0.3.9",
+	"Version": 13,
+	"VersionName": "0.3.10",
 	"FriendlyName": "GitLink",
 	"Description": "In-process libgit2 source control provider for Unreal. Clean-room replacement for GitSourceControl.",
 	"Category": "Source Control",
