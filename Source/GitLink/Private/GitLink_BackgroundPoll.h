@@ -38,18 +38,8 @@ public:
 	// Used after file save to get sub-2-second View Changes refresh.
 	auto Request_ImmediatePoll() -> void;
 
-	// Temporarily pauses the poll for the duration of the returned scope guard. Used by
-	// commands that modify the working tree (commit, revert) so the poll doesn't race.
-	struct FScopedPause
-	{
-		FScopedPause(FGitLink_BackgroundPoll& InOwner) : _Owner(InOwner) { ++_Owner._PauseCount; }
-		~FScopedPause() { --_Owner._PauseCount; }
-		FGitLink_BackgroundPoll& _Owner;
-	};
-
 private:
 	FGitLink_Provider& _Owner;
 	float _IntervalSeconds = 30.f;
 	float _TimeSinceLastPoll = 0.f;
-	TAtomic<int32> _PauseCount{0};
 };

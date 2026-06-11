@@ -1,6 +1,5 @@
 #include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
-#include "GitLink_LfsHttpClient.h"
 
 #include "GitLink/GitLink_Provider.h"
 #include "GitLinkLog.h"
@@ -51,13 +50,17 @@ namespace gitlink::cmd
 
 		if (InCtx.Repository == nullptr || !InCtx.Repository->IsOpen())
 		{
-			const FString LastError = gitlink::FRepository::Get_LastOpenError();
+			// Read the open failure from the provider, NOT FRepository::Get_LastOpenError() —
+			// that error channel is thread_local (the open failed on the game thread during
+			// CheckRepositoryStatus; this handler may run on a task-graph worker, where the
+			// thread-local slot is empty).
+			const FText LastError = InCtx.Provider.Get_LastConnectError();
 			const FText ErrText = FText::Format(
 				LOCTEXT("ConnectNoRepo",
 					"GitLink: no git repository found. {0}"),
 				LastError.IsEmpty()
 					? LOCTEXT("ConnectNoRepoGeneric", "Check the repository root override in Editor Preferences > GitLink.")
-					: FText::FromString(LastError));
+					: LastError);
 
 			ConnectOp->SetErrorText(ErrText);
 			return FCommandResult::Fail(ErrText);
@@ -78,8 +81,14 @@ namespace gitlink::cmd
 
 		// Initial status population — two stages:
 		//
-		//   Stage 1: run the dirty-status scan to get states for everything the editor should
-		//            mark as modified / added / deleted / etc. These are the high-value states.
+		//   Stage 1: run the full UpdateStatus scan. This produces states for everything dirty
+		//            AND — because UpdateStatus force-runs its cross-repo sweep when invoked
+		//            from Connect — discovers all LFS locks (ours + other users', per-repo,
+		//            with per-repo bSuccess gating and the replica-lag guard). Lock discovery
+		//            used to be a separate Stage 3 here; it was deleted because it duplicated
+		//            the sweep (double-polling every repo on first connect) and lacked the
+		//            failed-poll gating, so a transient network blip during a reconnect wiped
+		//            teammates' LockedOther state until the next timer sweep.
 		//
 		//   Stage 2: enumerate the git index and emit Unmodified states for every tracked file
 		//            NOT already in the dirty snapshot. Without this, content-browser right-click
@@ -88,6 +97,10 @@ namespace gitlink::cmd
 		//
 		// Both stages feed into Result.UpdatedStates which the dispatcher merges into the cache
 		// on the game thread before broadcasting OnSourceControlStateChanged.
+		//
+		// Lock state on Stage-1 states is owned by UpdateStatus (carry-forward + sweep). Do NOT
+		// re-stamp it here — an earlier revision overwrote every state with the NotLocked /
+		// Unlockable default, destroying the sweep's results.
 		FCommandResult StatusResult = UpdateStatus(InCtx, InOperation, /*InFiles=*/ {});
 		if (StatusResult.bOk)
 		{
@@ -102,17 +115,9 @@ namespace gitlink::cmd
 
 		const int32 DirtyCount = Result.UpdatedStates.Num();
 
-		// Stamp Lock state on the dirty states too — dirty files can still be lockable assets
-		// (e.g. a modified .uasset) and we want CanCheckout / IsCheckedOutOther to report the
-		// right thing for them once we populate actual lock-by-others info in a follow-up.
-		for (const FGitLink_FileStateRef& State : Result.UpdatedStates)
-		{
-			const bool bLockable = InCtx.Provider.Is_FileLockable(State->GetFilename());
-			State->_State.Lock = bLockable ? EGitLink_LockState::NotLocked : EGitLink_LockState::Unlockable;
-		}
-
-		// Build a set of the dirty-file paths we've already emitted, so we don't clobber a real
-		// Modified/Added/Deleted state with an Unmodified one from the index enumeration.
+		// Build a set of the paths we've already emitted (dirty files + locked files from the
+		// sweep), so we don't clobber a real Modified/Added/Deleted/Locked state with an
+		// Unmodified one from the index enumeration.
 		TSet<FString> DirtyPaths;
 		DirtyPaths.Reserve(DirtyCount);
 		for (const FGitLink_FileStateRef& State : Result.UpdatedStates)
@@ -152,126 +157,11 @@ namespace gitlink::cmd
 		// editor queries, which the on-demand path avoids by reusing the editor's
 		// exact normalized path.
 
-		// Stage 3: query LFS locks via /locks/verify so the editor shows accurate lock state
-		// from the start — including files locked by OTHER users.
-		//
-		// The verify endpoint returns server-authoritative `ours` / `theirs` partitions, which
-		// avoids comparing usernames (`git config user.name` can differ from the LFS server
-		// identity). Default transport is the in-process HTTP client; subprocess is the
-		// per-repo fallback when endpoint resolution or auth fails.
-		//
-		// Submodules: each submodule is polled independently against its own LFS endpoint.
-		// Results are merged into a single absolute-path-keyed map before applying.
-		if (InCtx.Subprocess != nullptr && InCtx.Subprocess->IsValid() && InCtx.Provider.Is_LfsAvailable())
-		{
-			TMap<FString, FString> RemoteLocksAbs;
-			TSet<FString>          OursAbs;
-
-			auto AbsolutizeFor = [](const FString& InRepoRoot, const FString& InRelPath) -> FString
-			{
-				return Normalize_AbsolutePath(FPaths::Combine(InRepoRoot, InRelPath));
-			};
-
-			// Build the (repo_root, cwd_override) list — parent first, then each LFS-using
-			// submodule. Non-LFS submodules (source-only plugins, etc.) are skipped — they
-			// don't have lockable content so polling their LFS endpoints is wasted work.
-			const TArray<FString> LfsSubmodulePaths = InCtx.Provider.Get_LfsSubmodulePaths();
-			TArray<TPair<FString, FString>> RepoPolls;
-			RepoPolls.Reserve(1 + LfsSubmodulePaths.Num());
-			RepoPolls.Add({ InCtx.RepoRootAbsolute, FString() });
-			for (const FString& SubRoot : LfsSubmodulePaths)
-			{ RepoPolls.Add({ SubRoot, SubRoot }); }
-
-			// Each `git lfs locks --verify --json` is a network call; doing 34 of them serially
-			// stalls Connect for ~30s. Run them concurrently — FGitLink_Subprocess::Run is
-			// thread-safe (only reads const _GitBinary/_WorkingDirectory and spawns a subprocess
-			// per call). Merging into the maps happens sequentially after all complete.
-			TArray<FGitLink_Subprocess::FLfsLocksSnapshot> Snapshots;
-			Snapshots.SetNum(RepoPolls.Num());
-
-			// Snapshot the LFS client + subprocess handles before fanning out — same rationale as
-			// Cmd_UpdateStatus. The raw-pointer pattern previously crashed in TScopeLock when
-			// `FGitLink_Provider::Close()` (Init(force=true) tear-down) fired while a worker was
-			// mid-deref. TSharedPtr locals keep the objects alive for the parallel-for duration.
-			// See v0.3.6 in CLAUDE.md Version log.
-			const TSharedPtr<FGitLink_LfsHttpClient> LfsClient = InCtx.Provider.Get_LfsHttpClient();
-			const TSharedPtr<FGitLink_Subprocess>    Subprocess = InCtx.Subprocess;
-			const bool bUseHttp = gitlink::lfs_http::Is_Enabled() && LfsClient.IsValid();
-
-			ParallelFor_BoundedConcurrency(RepoPolls.Num(), GMaxConcurrentRepoWorkers, [&](int32 Idx)
-			{
-				// Don't start a doomed HTTP request if the editor is tearing down — the HTTP
-				// module may already be unloading. PostVerify_Once also guards this (the durable
-				// fix); bailing here just avoids 12 s of pointless wait per worker on exit.
-				if (IsEngineExitRequested())
-				{ return; }
-
-				const FString& RepoRoot = RepoPolls[Idx].Key;
-				if (bUseHttp && LfsClient->Has_LfsUrl(RepoRoot))
-				{
-					Snapshots[Idx] = LfsClient->Request_LocksVerify(RepoRoot);
-					if (Snapshots[Idx].bSuccess) { return; }
-				}
-				Snapshots[Idx] = Subprocess->QueryLfsLocks_Verified(RepoPolls[Idx].Value);
-			});
-
-			for (int32 Idx = 0; Idx < RepoPolls.Num(); ++Idx)
-			{
-				const FString& RepoRoot = RepoPolls[Idx].Key;
-				const FGitLink_Subprocess::FLfsLocksSnapshot& Snap = Snapshots[Idx];
-				for (const auto& [RelPath, Owner] : Snap.AllLocks)
-				{
-					const FString Abs = AbsolutizeFor(RepoRoot, RelPath);
-					RemoteLocksAbs.Add(Abs, Owner);
-					if (Snap.OursPaths.Contains(RelPath))
-					{ OursAbs.Add(Abs); }
-				}
-			}
-
-			int32 OurLockCount   = 0;
-			int32 OtherLockCount = 0;
-
-			for (const auto& [Absolute, LockOwner] : RemoteLocksAbs)
-			{
-				const bool bIsOurs = OursAbs.Contains(Absolute);
-				const EGitLink_LockState LockState = bIsOurs
-					? EGitLink_LockState::Locked
-					: EGitLink_LockState::LockedOther;
-
-				// Find or create a state entry for this locked file.
-				bool bFound = false;
-				for (const FGitLink_FileStateRef& State : Result.UpdatedStates)
-				{
-					if (State->GetFilename().Equals(Absolute, ESearchCase::IgnoreCase))
-					{
-						State->_State.Lock     = LockState;
-						State->_State.LockUser = LockOwner;
-						bFound = true;
-						break;
-					}
-				}
-
-				if (!bFound)
-				{
-					FGitLink_CompositeState Composite;
-					Composite.File         = EGitLink_FileState::Unknown;
-					Composite.Tree         = EGitLink_TreeState::Unmodified;
-					Composite.Lock         = LockState;
-					Composite.LockUser     = LockOwner;
-					Composite.bInSubmodule = InCtx.Provider.Is_InSubmodule(Absolute);
-					Result.UpdatedStates.Add(Make_FileState(Absolute, Composite));
-				}
-
-				if (bIsOurs) { ++OurLockCount; } else { ++OtherLockCount; }
-			}
-
-			if (OurLockCount > 0 || OtherLockCount > 0)
-			{
-				UE_LOG(LogGitLink, Log,
-					TEXT("Cmd_Connect: discovered %d lock(s) held by us, %d by others (across 1 parent + %d LFS submodule(s))"),
-					OurLockCount, OtherLockCount, LfsSubmodulePaths.Num());
-			}
-		}
+		// NOTE: LFS lock discovery (formerly "Stage 3" here) lives inside the UpdateStatus call
+		// above — its cross-repo sweep force-runs for the Connect operation. Keeping a second
+		// sweep here double-polled every repo's /locks/verify endpoint on connect, and this
+		// copy had drifted behind UpdateStatus's (no per-repo bSuccess gating, no replica-lag
+		// guard), so a transient poll failure during a reconnect erased lock state.
 
 		UE_LOG(LogGitLink, Log,
 			TEXT("Cmd_Connect: initial state cache = %d dirty + %d unmodified-tracked file(s) ")

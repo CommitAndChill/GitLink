@@ -40,6 +40,10 @@ namespace gitlink::op
 			FProgressCallback UserProgress;
 			bool              bCancelRequested = false;
 			FString           Stage;
+
+			// Set by PushUpdateReference_Cb when the server rejects a ref update. git_remote_push
+			// still returns 0 in that case, so PushRemote must check this after the call.
+			FString           PushRefError;
 		};
 
 		// ---- Credential ----
@@ -116,6 +120,27 @@ namespace gitlink::op
 				Payload->bCancelRequested = true;
 				return GIT_EUSER;
 			}
+			return 0;
+		}
+
+		// ---- Push ref-update status ----
+		// Called once per pushed ref after the server responds. status == nullptr means the ref was
+		// accepted; non-null means the server rejected it (protected branch, pre-receive hook, ...)
+		// and status carries the server's reason. This is the ONLY place rejections surface —
+		// git_remote_push itself returns 0 regardless.
+		int PushUpdateReference_Cb(const char* InRefname, const char* InStatus, void* InPayload)
+		{
+			if (InStatus == nullptr)
+			{ return 0; }
+
+			auto* Payload = static_cast<FCallbackPayload*>(InPayload);
+			if (Payload == nullptr)
+			{ return 0; }
+
+			Payload->PushRefError = FString::Printf(
+				TEXT("%s: %s"),
+				InRefname != nullptr ? UTF8_TO_TCHAR(InRefname) : TEXT("(unknown ref)"),
+				UTF8_TO_TCHAR(InStatus));
 			return 0;
 		}
 
@@ -239,6 +264,7 @@ namespace gitlink::op
 
 		Opts.callbacks.credentials           = &CredentialAcquire_Cb;
 		Opts.callbacks.push_transfer_progress = &PushTransferProgress_Cb;
+		Opts.callbacks.push_update_reference  = &PushUpdateReference_Cb;
 		Opts.callbacks.payload                = &Payload;
 
 		const int32 Rc = git_remote_push(Remote.Get(), &RefspecArray, &Opts);
@@ -248,6 +274,14 @@ namespace gitlink::op
 			{ return FResult::Fail(TEXT("PushRemote: cancelled by progress callback")); }
 
 			return libgit2::MakeFailResult(TEXT("PushRemote: git_remote_push"), Rc);
+		}
+
+		// git_remote_push returning 0 only means the transport round-trip succeeded — server-side
+		// ref rejections are reported via the push_update_reference callback.
+		if (!Payload.PushRefError.IsEmpty())
+		{
+			return FResult::Fail(FString::Printf(
+				TEXT("PushRemote: server rejected ref update — %s"), *Payload.PushRefError));
 		}
 
 		UE_LOG(LogGitLinkCore, Log,
@@ -307,49 +341,53 @@ namespace gitlink::op
 			if (RawTheirsHead) { git_annotated_commit_free(RawTheirsHead); }
 			return libgit2::MakeFailResult(TEXT("PullFastForward: git_annotated_commit_from_ref"), Rc);
 		}
+		libgit2::FAnnotatedCommitPtr TheirsHead(RawTheirsHead);
 
-		const git_annotated_commit* TheirsHead = RawTheirsHead;
+		const git_annotated_commit* TheirsHeadConst = TheirsHead.Get();
 		git_merge_analysis_t   Analysis   = GIT_MERGE_ANALYSIS_NONE;
 		git_merge_preference_t Preference = GIT_MERGE_PREFERENCE_NONE;
 
-		const int32 AnaRc = git_merge_analysis(&Analysis, &Preference, Raw, &TheirsHead, 1);
+		const int32 AnaRc = git_merge_analysis(&Analysis, &Preference, Raw, &TheirsHeadConst, 1);
 		if (AnaRc < 0)
 		{
-			git_annotated_commit_free(RawTheirsHead);
 			return libgit2::MakeFailResult(TEXT("PullFastForward: git_merge_analysis"), AnaRc);
 		}
 
 		// 5. Act on the analysis result.
 		if ((Analysis & GIT_MERGE_ANALYSIS_UP_TO_DATE) != 0)
 		{
-			git_annotated_commit_free(RawTheirsHead);
 			UE_LOG(LogGitLinkCore, Log, TEXT("PullFastForward: already up to date"));
 			return FResult::Ok();
 		}
 
 		if ((Analysis & GIT_MERGE_ANALYSIS_FASTFORWARD) == 0)
 		{
-			git_annotated_commit_free(RawTheirsHead);
 			return FResult::Fail(TEXT(
 				"PullFastForward: non-fast-forward merge required. "
 				"Use `git pull` or `git merge` from a terminal to resolve manually."));
 		}
 
-		// 6. Fast-forward: point HEAD's ref at the upstream OID, then checkout.
-		const git_oid* TheirsOid = git_annotated_commit_id(RawTheirsHead);
-		git_reference* RawNewHead = nullptr;
-		const int32 SetTargetRc = git_reference_set_target(
-			&RawNewHead, Head.Get(), TheirsOid, "GitLink fast-forward");
-		git_annotated_commit_free(RawTheirsHead);
+		// 6. Fast-forward: checkout the upstream tree FIRST, then move the branch ref. The order
+		//    matters — a SAFE checkout can fail on a dirty working tree, and if the ref had already
+		//    moved by then the repo would be stranded in a half-pulled state.
+		const git_oid* TheirsOid = git_annotated_commit_id(TheirsHead.Get());
 
-		if (SetTargetRc < 0 || RawNewHead == nullptr)
+		git_commit* RawTheirsCommit = nullptr;
+		if (const int32 Rc = git_commit_lookup(&RawTheirsCommit, Raw, TheirsOid); Rc < 0)
 		{
-			if (RawNewHead) { git_reference_free(RawNewHead); }
-			return libgit2::MakeFailResult(TEXT("PullFastForward: git_reference_set_target"), SetTargetRc);
+			if (RawTheirsCommit) { git_commit_free(RawTheirsCommit); }
+			return libgit2::MakeFailResult(TEXT("PullFastForward: git_commit_lookup"), Rc);
 		}
-		libgit2::FReferencePtr NewHead(RawNewHead);
+		libgit2::FCommitPtr TheirsCommit(RawTheirsCommit);
 
-		// 7. Force-checkout HEAD to sync the working tree.
+		git_tree* RawTheirsTree = nullptr;
+		if (const int32 Rc = git_commit_tree(&RawTheirsTree, TheirsCommit.Get()); Rc < 0)
+		{
+			if (RawTheirsTree) { git_tree_free(RawTheirsTree); }
+			return libgit2::MakeFailResult(TEXT("PullFastForward: git_commit_tree"), Rc);
+		}
+		libgit2::FTreePtr TheirsTree(RawTheirsTree);
+
 		git_checkout_options CheckoutOpts;
 		if (const int32 Rc = git_checkout_options_init(&CheckoutOpts, GIT_CHECKOUT_OPTIONS_VERSION); Rc < 0)
 		{
@@ -357,12 +395,25 @@ namespace gitlink::op
 		}
 		CheckoutOpts.checkout_strategy = GIT_CHECKOUT_SAFE;  // safer than FORCE; errors if local dirty
 
-		if (const int32 Rc = git_checkout_head(Raw, &CheckoutOpts); Rc < 0)
+		// git_checkout_tree takes any treeish git_object*; a git_tree IS-A git_object in libgit2.
+		const auto* TheirsTreeAsObject = reinterpret_cast<const git_object*>(TheirsTree.Get());
+		if (const int32 Rc = git_checkout_tree(Raw, TheirsTreeAsObject, &CheckoutOpts); Rc < 0)
 		{
 			return libgit2::MakeFailResult(
-				TEXT("PullFastForward: git_checkout_head (local modifications would be overwritten?)"),
+				TEXT("PullFastForward: git_checkout_tree (local modifications would be overwritten?)"),
 				Rc);
 		}
+
+		// 7. Working tree now matches upstream — safe to point HEAD's ref at the upstream OID.
+		git_reference* RawNewHead = nullptr;
+		const int32 SetTargetRc = git_reference_set_target(
+			&RawNewHead, Head.Get(), TheirsOid, "GitLink fast-forward");
+		if (SetTargetRc < 0 || RawNewHead == nullptr)
+		{
+			if (RawNewHead) { git_reference_free(RawNewHead); }
+			return libgit2::MakeFailResult(TEXT("PullFastForward: git_reference_set_target"), SetTargetRc);
+		}
+		libgit2::FReferencePtr NewHead(RawNewHead);
 
 		UE_LOG(LogGitLinkCore, Log, TEXT("PullFastForward: fast-forwarded HEAD"));
 		return FResult::Ok();

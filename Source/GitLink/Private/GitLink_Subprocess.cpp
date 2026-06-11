@@ -5,6 +5,7 @@
 #include <Dom/JsonObject.h>
 #include <HAL/FileManager.h>
 #include <HAL/PlatformProcess.h>
+#include <HAL/PlatformTime.h>
 #include <Misc/FileHelper.h>
 #include <Misc/Paths.h>
 #include <Serialization/JsonReader.h>
@@ -14,17 +15,65 @@
 
 namespace
 {
-	// Quote a single argument if it contains whitespace or a quote character. Matches how
-	// Windows CreateProcess parses the command-line string.
+	// Quote a single argument following the MSVC argv parsing rules (what CommandLineToArgvW
+	// and git's runtime use to split the command line back into arguments):
+	//   - quote when the arg contains any whitespace (space/tab/newline), a quote, or is empty
+	//   - a literal `"` becomes `\"`, and any run of backslashes immediately PRECEDING a quote
+	//     (including the closing quote we add) must be doubled — `a\"b` → `"a\\\"b"`, and an
+	//     arg ending in `\` → `"...\\"`. The previous version skipped the backslash-doubling,
+	//     so an argument ending in a backslash (or containing `\"`) corrupted the parsed
+	//     argument list — with the commit message passed via `-m`, a crafted description could
+	//     splice extra tokens into the git command line.
 	auto QuoteArg(const FString& InArg) -> FString
 	{
-		const bool bNeedsQuotes = InArg.Contains(TEXT(" ")) || InArg.Contains(TEXT("\"")) || InArg.IsEmpty();
+		const bool bNeedsQuotes =
+			   InArg.IsEmpty()
+			|| InArg.Contains(TEXT(" "))
+			|| InArg.Contains(TEXT("\t"))
+			|| InArg.Contains(TEXT("\n"))
+			|| InArg.Contains(TEXT("\r"))
+			|| InArg.Contains(TEXT("\""));
 		if (!bNeedsQuotes)
 		{ return InArg; }
 
-		FString Escaped = InArg;
-		Escaped.ReplaceInline(TEXT("\""), TEXT("\\\""));
-		return FString::Printf(TEXT("\"%s\""), *Escaped);
+		FString Out;
+		Out.Reserve(InArg.Len() + 8);
+		Out += TEXT("\"");
+
+		int32 BackslashRun = 0;
+		for (int32 Idx = 0; Idx < InArg.Len(); ++Idx)
+		{
+			const TCHAR Ch = InArg[Idx];
+			if (Ch == TEXT('\\'))
+			{
+				++BackslashRun;
+				continue;
+			}
+
+			if (Ch == TEXT('"'))
+			{
+				// Backslashes before a quote are escape characters — double them, then
+				// escape the quote itself.
+				for (int32 N = 0; N < BackslashRun * 2 + 1; ++N)
+				{ Out += TEXT("\\"); }
+				Out += TEXT("\"");
+			}
+			else
+			{
+				// Backslashes NOT followed by a quote are literal.
+				for (int32 N = 0; N < BackslashRun; ++N)
+				{ Out += TEXT("\\"); }
+				Out += Ch;
+			}
+			BackslashRun = 0;
+		}
+
+		// Trailing backslashes precede the closing quote we're about to add — double them.
+		for (int32 N = 0; N < BackslashRun * 2; ++N)
+		{ Out += TEXT("\\"); }
+
+		Out += TEXT("\"");
+		return Out;
 	}
 
 	auto JoinArgs(const TArray<FString>& InArgs) -> FString
@@ -129,6 +178,86 @@ auto FGitLink_Subprocess::RunLfs(const TArray<FString>& InArgs, const FString& I
 	LfsArgs.Add(TEXT("lfs"));
 	LfsArgs.Append(InArgs);
 	return Run(LfsArgs, InCwdOverride);
+}
+
+auto FGitLink_Subprocess::Run_Bounded(const TArray<FString>& InArgs, const FString& InCwdOverride,
+	double InTimeoutSec) -> FGitLink_SubprocessResult
+{
+	FGitLink_SubprocessResult Result;
+
+	if (!IsValid())
+	{
+		Result.StdErr = TEXT("FGitLink_Subprocess: no git binary configured");
+		return Result;
+	}
+
+	const FString ArgsStr = JoinArgs(InArgs);
+	const FString& EffectiveCwd = InCwdOverride.IsEmpty() ? _WorkingDirectory : InCwdOverride;
+
+	UE_LOG(LogGitLink, Verbose,
+		TEXT("Subprocess(bounded %.0fs): %s %s  (cwd=%s)"),
+		InTimeoutSec, *_GitBinary, *ArgsStr, *EffectiveCwd);
+
+	void* PipeRead  = nullptr;
+	void* PipeWrite = nullptr;
+	FPlatformProcess::CreatePipe(PipeRead, PipeWrite);
+
+	FProcHandle Proc = FPlatformProcess::CreateProc(
+		*_GitBinary,
+		*ArgsStr,
+		/*bLaunchDetached=*/ false,
+		/*bLaunchHidden=*/ true,
+		/*bLaunchReallyHidden=*/ true,
+		/*OutProcessID=*/ nullptr,
+		/*InPriority=*/ 0,
+		EffectiveCwd.IsEmpty() ? nullptr : *EffectiveCwd,
+		/*PipeWriteChild=*/ PipeWrite,
+		/*PipeReadChild=*/ nullptr);
+
+	if (!Proc.IsValid())
+	{
+		FPlatformProcess::ClosePipe(PipeRead, PipeWrite);
+		Result.StdErr = FString::Printf(TEXT("failed to spawn '%s %s'"), *_GitBinary, *ArgsStr);
+		UE_LOG(LogGitLink, Warning, TEXT("Subprocess(bounded): %s"), *Result.StdErr);
+		return Result;
+	}
+	Result.bSpawned = true;
+
+	const double DeadlineSec = FPlatformTime::Seconds() + InTimeoutSec;
+	bool bTimedOut = false;
+	while (FPlatformProcess::IsProcRunning(Proc))
+	{
+		Result.StdOut += FPlatformProcess::ReadPipe(PipeRead);
+
+		if (FPlatformTime::Seconds() > DeadlineSec)
+		{
+			bTimedOut = true;
+			UE_LOG(LogGitLink, Warning,
+				TEXT("Subprocess(bounded): '%s %s' exceeded %.0fs — terminating (wedged credential ")
+				TEXT("helper / interactive prompt / dead remote?)"),
+				*_GitBinary, *ArgsStr, InTimeoutSec);
+			FPlatformProcess::TerminateProc(Proc, /*KillTree=*/ true);
+			break;
+		}
+
+		FPlatformProcess::Sleep(0.01f);
+	}
+	Result.StdOut += FPlatformProcess::ReadPipe(PipeRead);
+
+	int32 ExitCode = -1;
+	FPlatformProcess::GetProcReturnCode(Proc, &ExitCode);
+	FPlatformProcess::CloseProc(Proc);
+	FPlatformProcess::ClosePipe(PipeRead, PipeWrite);
+
+	if (bTimedOut)
+	{
+		Result.ExitCode = -1;
+		Result.StdErr   = FString::Printf(TEXT("timed out after %.0fs"), InTimeoutSec);
+		return Result;
+	}
+
+	Result.ExitCode = ExitCode;
+	return Result;
 }
 
 auto FGitLink_Subprocess::IsLfsAvailable() -> bool

@@ -98,12 +98,14 @@ struct FGitLink_CompositeState
 	/// route libgit2 / git-lfs subprocess calls into the inner submodule repo so each
 	/// submodule's own LFS server, remote, and credentials are used.
 	///
-	/// Two state predicates also short-circuit on this flag:
-	///   - IsSourceControlled() returns true unconditionally, so History/Diff stay enabled
-	///     even before per-submodule status has populated the cache entry.
+	/// One state predicate short-circuits on this flag:
 	///   - IsCurrent() returns true unconditionally, since we don't poll submodule remote
 	///     tracking branches (and Unreal's pre-delete check would otherwise misread the
 	///     default Remote=Unset as "not at latest").
+	/// IsSourceControlled() deliberately does NOT short-circuit (the v0.2.0 fix): tracked
+	/// submodule files satisfy it because Provider::GetState stamps Tree=Unmodified on them
+	/// via Is_TrackedInSubmodule; untracked submodule files correctly fail it, which is what
+	/// stops UE's auto-CheckOut-on-save flow from prompting to lock brand-new files.
 	/// All other predicates (CanCheckout/CanCheckIn/CanAdd/CanDelete/CanRevert/IsCheckedOut)
 	/// behave identically for outer-repo and submodule files, driven by lock + tree state.
 	bool bInSubmodule = false;

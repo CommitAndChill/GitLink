@@ -93,11 +93,30 @@ namespace
 		// emits the resolved credential to stdout and exits.
 		FPlatformProcess::WritePipe(StdInWrite, InInput);
 
-		// Drain stdout while the process runs.
+		// Drain stdout while the process runs — with a hard deadline. A credential helper that
+		// pops an interactive prompt (or just hangs) would otherwise pin this worker thread
+		// forever; the LFS poll workers have no other escape hatch (unlike the HTTP request
+		// itself, which has its own timeout). 30s is generous for any non-interactive helper.
+		constexpr double kCredentialFillTimeoutSec = 30.0;
+		const double DeadlineSec = FPlatformTime::Seconds() + kCredentialFillTimeoutSec;
+
+		bool bTimedOut = false;
 		FString StdOutText;
 		while (FPlatformProcess::IsProcRunning(Proc))
 		{
 			StdOutText += FPlatformProcess::ReadPipe(StdOutRead);
+
+			if (FPlatformTime::Seconds() > DeadlineSec)
+			{
+				bTimedOut = true;
+				UE_LOG(LogGitLink, Warning,
+					TEXT("LfsHttpClient: 'git credential fill' did not finish within %.0fs ")
+					TEXT("(interactive prompt from the credential helper?) — terminating it"),
+					kCredentialFillTimeoutSec);
+				FPlatformProcess::TerminateProc(Proc, /*KillTree=*/ true);
+				break;
+			}
+
 			FPlatformProcess::Sleep(0.01f);
 		}
 		StdOutText += FPlatformProcess::ReadPipe(StdOutRead);
@@ -107,6 +126,9 @@ namespace
 		FPlatformProcess::CloseProc(Proc);
 		FPlatformProcess::ClosePipe(StdInRead,  StdInWrite);
 		FPlatformProcess::ClosePipe(StdOutRead, StdOutWrite);
+
+		if (bTimedOut)
+		{ return FString(); }
 
 		if (ExitCode != 0)
 		{
@@ -437,7 +459,37 @@ auto FGitLink_LfsHttpClient::PostVerify_Once(
 	{ return Out; }
 
 	// Build request body. Per the LFS spec: `ref` is optional; `cursor` is supplied for
-	// pagination only.
+	// pagination only. Values are JSON-escaped: RefName comes from `git symbolic-ref HEAD`
+	// and git ref-name rules are permissive enough that an exotic branch name (or a hostile
+	// cursor echoed back from the server) could otherwise break out of the string literal
+	// and inject fields into the request body.
+	auto EscapeJsonString = [](const FString& InRaw) -> FString
+	{
+		FString Escaped;
+		Escaped.Reserve(InRaw.Len() + 8);
+		for (int32 Idx = 0; Idx < InRaw.Len(); ++Idx)
+		{
+			const TCHAR Ch = InRaw[Idx];
+			switch (Ch)
+			{
+				case TEXT('"'):  Escaped += TEXT("\\\""); break;
+				case TEXT('\\'): Escaped += TEXT("\\\\"); break;
+				case TEXT('\b'): Escaped += TEXT("\\b");  break;
+				case TEXT('\f'): Escaped += TEXT("\\f");  break;
+				case TEXT('\n'): Escaped += TEXT("\\n");  break;
+				case TEXT('\r'): Escaped += TEXT("\\r");  break;
+				case TEXT('\t'): Escaped += TEXT("\\t");  break;
+				default:
+					if (Ch < TEXT(' '))
+					{ Escaped += FString::Printf(TEXT("\\u%04x"), static_cast<int32>(Ch)); }
+					else
+					{ Escaped += Ch; }
+					break;
+			}
+		}
+		return Escaped;
+	};
+
 	FString Body = TEXT("{");
 	bool bFirstField = true;
 	auto AddField = [&](const FString& Json)
@@ -448,11 +500,11 @@ auto FGitLink_LfsHttpClient::PostVerify_Once(
 	};
 	if (!InEndpoint.RefName.IsEmpty())
 	{
-		AddField(FString::Printf(TEXT("\"ref\":{\"name\":\"%s\"}"), *InEndpoint.RefName));
+		AddField(FString::Printf(TEXT("\"ref\":{\"name\":\"%s\"}"), *EscapeJsonString(InEndpoint.RefName)));
 	}
 	if (!InCursor.IsEmpty())
 	{
-		AddField(FString::Printf(TEXT("\"cursor\":\"%s\""), *InCursor));
+		AddField(FString::Printf(TEXT("\"cursor\":\"%s\""), *EscapeJsonString(InCursor)));
 	}
 	Body += TEXT("}");
 

@@ -22,9 +22,19 @@ auto FGitLink_Revision::Get(FString& InOutFilename, EConcurrency::Type /*InConcu
 auto FGitLink_Revision::Get(FString& InOutFilename) const -> bool
 #endif
 {
-	// Access the provider to get the subprocess and repo root.
-	FGitLink_Provider& Provider = static_cast<FGitLink_Provider&>(
-		ISourceControlModule::Get().GetProvider());
+	// Access the provider to get the subprocess and repo root. Revision objects live inside
+	// cached file states, and the editor's history/diff windows can outlive a provider switch
+	// (e.g. user changes to Perforce/None in Revision Control settings) — blindly downcasting
+	// the active provider would then be undefined behavior. Verify it's actually GitLink first.
+	ISourceControlProvider& ActiveProvider = ISourceControlModule::Get().GetProvider();
+	if (ActiveProvider.GetName() != FName(TEXT("GitLink")))
+	{
+		UE_LOG(LogGitLink, Warning,
+			TEXT("FGitLink_Revision::Get: active source control provider is '%s', not GitLink — ")
+			TEXT("cannot extract revision content"), *ActiveProvider.GetName().ToString());
+		return false;
+	}
+	FGitLink_Provider& Provider = static_cast<FGitLink_Provider&>(ActiveProvider);
 	// Snapshot the shared subprocess handle so it can't be Reset() out from under us mid-call
 	// (Get() then a raw-pointer deref would race against Provider::Close()). See v0.3.6 in
 	// CLAUDE.md Version log.
@@ -58,11 +68,16 @@ auto FGitLink_Revision::Get(FString& InOutFilename) const -> bool
 	RelativePath.ReplaceInline(TEXT("\\"), TEXT("/"));
 	RelativePath.RemoveFromStart(TEXT("/"));
 
-	// Build temp file path.
+	// Build temp file path. The repo-relative path is hashed in alongside the basename:
+	// two same-named files in different folders at the same commit (common in UE projects —
+	// A/Foo.uasset and B/Foo.uasset touched by one batch commit) would otherwise collide on
+	// the temp filename, and the reuse branch below would silently serve the WRONG file's
+	// content to the second diff.
 	const FString TempDir = FPaths::DiffDir();
 	const FString CleanFilename = FPaths::GetCleanFilename(_Filename);
+	const uint32 PathHash = GetTypeHash(RelativePath.ToLower());
 	const FString TempFilename = FPaths::ConvertRelativePathToFull(
-		FPaths::Combine(TempDir, FString::Printf(TEXT("temp-%s-%s"), *_ShortCommitId, *CleanFilename)));
+		FPaths::Combine(TempDir, FString::Printf(TEXT("temp-%s-%08x-%s"), *_ShortCommitId, PathHash, *CleanFilename)));
 
 	// Reuse if already extracted — but only if the cached file is non-empty. Zero-byte leftovers
 	// from an earlier broken extraction would otherwise silently defeat the retry: UE would load

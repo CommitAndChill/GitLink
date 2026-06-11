@@ -44,73 +44,72 @@ namespace gitlink::cmd
 
 		UE_LOG(LogGitLink, Log, TEXT("Cmd_Delete: deleting %d file(s)"), InFiles.Num());
 
+		// Files we could not fully process — unlink failed, repo wouldn't open, or staging
+		// failed. These are excluded from the unlock pass and from the predictive Deleted/Staged
+		// stamping below (their cached state stays as-is), and surface as a non-fatal error.
+		// Stamping them anyway used to make the cache lie: the editor showed a staged deletion
+		// for a file that was never staged (or still exists on disk).
+		TSet<FString> FailedFiles;
+		TArray<FString> BatchErrors;
+
 		// Remove files that are still on disk. Tolerate missing files (editor may have already
-		// unlinked them) — the stage step below will pick up the deletions either way.
+		// unlinked them) — the stage step below will pick up the deletions either way. A file
+		// that exists but can't be unlinked (open handle in another process) is a real failure:
+		// staging it would record the still-existing content, not a deletion.
 		IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 		for (const FString& File : InFiles)
 		{
-			if (PlatformFile.FileExists(*File))
+			if (PlatformFile.FileExists(*File) && !PlatformFile.DeleteFile(*File))
 			{
-				PlatformFile.DeleteFile(*File);
+				UE_LOG(LogGitLink, Warning,
+					TEXT("Cmd_Delete: could not delete '%s' from disk (file in use?) — skipping"), *File);
+				FailedFiles.Add(File);
+				BatchErrors.Add(FString::Printf(TEXT("could not delete '%s' from disk"), *File));
 			}
 		}
 
-		// Partition into outer-repo files and per-submodule buckets keyed by submodule root.
-		TArray<FString> OuterFiles;
-		TMap<FString, TArray<FString>> FilesBySubmoduleRoot;
-		OuterFiles.Reserve(InFiles.Num());
-
+		TArray<FString> Deletable;
+		Deletable.Reserve(InFiles.Num());
 		for (const FString& File : InFiles)
 		{
-			const FString SubmoduleRoot = InCtx.Provider.Get_SubmoduleRoot(File);
-			if (SubmoduleRoot.IsEmpty())
-			{ OuterFiles.Add(File); }
-			else
-			{ FilesBySubmoduleRoot.FindOrAdd(SubmoduleRoot).Add(File); }
+			if (!FailedFiles.Contains(File))
+			{ Deletable.Add(File); }
 		}
 
-		// Outer-repo bucket — existing path.
-		if (!OuterFiles.IsEmpty())
+		// Route each per-repo bucket's staging into the right repository. RelativeFiles (NOT
+		// the editor's absolute paths) go into the libgit2 pathspec — git_index_add_all
+		// matches repo-relative, so an absolute path silently stages nothing (Pitfall #2).
+		const TArray<FRepoBatch> Batches = PartitionByRepo(InCtx, Deletable);
+		for (const FRepoBatch& Batch : Batches)
 		{
-			const FResult StageRes = InCtx.Repository->Stage(OuterFiles);
+			TUniquePtr<gitlink::FRepository> SubRepo;
+			gitlink::FRepository* TargetRepo = InCtx.Repository.Get();
+			if (Batch.bIsSubmodule)
+			{
+				SubRepo = InCtx.Provider.Open_SubmoduleRepositoryFor(Batch.AbsoluteFiles[0]);
+				if (!SubRepo.IsValid())
+				{
+					UE_LOG(LogGitLink, Warning,
+						TEXT("Cmd_Delete: could not open submodule repo at '%s' — skipping %d file(s)"),
+						*Batch.RepoRoot, Batch.AbsoluteFiles.Num());
+					FailedFiles.Append(Batch.AbsoluteFiles);
+					BatchErrors.Add(FString::Printf(
+						TEXT("could not open submodule repo at '%s'"), *Batch.RepoRoot));
+					continue;
+				}
+				TargetRepo = SubRepo.Get();
+			}
+
+			const FResult StageRes = TargetRepo->Stage(Batch.RelativeFiles);
 			if (!StageRes)
 			{
 				UE_LOG(LogGitLink, Warning,
-					TEXT("Cmd_Delete: outer Stage failed: %s"), *StageRes.ErrorMessage);
-				return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
-			}
-		}
-
-		// Submodule buckets — open each submodule's repo and stage repo-relative paths there.
-		for (const TPair<FString, TArray<FString>>& Pair : FilesBySubmoduleRoot)
-		{
-			const FString& SubmoduleRoot = Pair.Key;
-			const TArray<FString>& SubFiles = Pair.Value;
-
-			TUniquePtr<gitlink::FRepository> SubRepo =
-				InCtx.Provider.Open_SubmoduleRepositoryFor(SubFiles[0]);
-			if (!SubRepo.IsValid())
-			{
-				UE_LOG(LogGitLink, Warning,
-					TEXT("Cmd_Delete: could not open submodule repo at '%s' — skipping %d file(s)"),
-					*SubmoduleRoot, SubFiles.Num());
+					TEXT("Cmd_Delete: Stage in '%s' failed: %s"),
+					*Batch.RepoRoot, *StageRes.ErrorMessage);
+				FailedFiles.Append(Batch.AbsoluteFiles);
+				BatchErrors.Add(FString::Printf(
+					TEXT("staging deletions in '%s' failed: %s"), *Batch.RepoRoot, *StageRes.ErrorMessage));
 				continue;
-			}
-
-			TArray<FString> SubRelative;
-			SubRelative.Reserve(SubFiles.Num());
-			for (const FString& Abs : SubFiles)
-			{
-				SubRelative.Add(ToRepoRelativePath(SubmoduleRoot, Abs));
-			}
-
-			const FResult SubStageRes = SubRepo->Stage(SubRelative);
-			if (!SubStageRes)
-			{
-				UE_LOG(LogGitLink, Warning,
-					TEXT("Cmd_Delete: submodule '%s' Stage failed: %s"),
-					*SubmoduleRoot, *SubStageRes.ErrorMessage);
-				return FCommandResult::Fail(FText::FromString(SubStageRes.ErrorMessage));
 			}
 		}
 
@@ -129,6 +128,9 @@ namespace gitlink::cmd
 		UncommittedAddsToUnlock.Reserve(InFiles.Num());
 		for (const FString& File : InFiles)
 		{
+			if (FailedFiles.Contains(File))
+			{ continue; }  // deletion didn't go through — releasing the lock would be premature
+
 			const FGitLink_FileStateRef Existing = InCtx.StateCache.Find_FileState(File);
 			if (Existing->_State.File == EGitLink_FileState::Added)
 			{
@@ -148,19 +150,22 @@ namespace gitlink::cmd
 
 		FCommandResult Result = FCommandResult::Ok();
 
+		if (!BatchErrors.IsEmpty())
+		{
+			Result.bOk = false;
+			Result.ErrorMessages.Add(FText::Format(
+				LOCTEXT("DeleteBatchFailed",
+					"Failed to stage the deletion of {0} file(s); their source control state is "
+					"unchanged. Details: {1}"),
+				FText::AsNumber(FailedFiles.Num()),
+				FText::FromString(JoinTruncated(BatchErrors))));
+		}
+
 		if (!UnlockOutcome.FailedPaths.IsEmpty())
 		{
 			Result.bOk = false;
 
-			FString Joined;
-			for (int32 Idx = 0; Idx < UnlockOutcome.ErrorMessages.Num(); ++Idx)
-			{
-				if (Idx > 0) { Joined += TEXT("\n"); }
-				Joined += UnlockOutcome.ErrorMessages[Idx];
-			}
-			constexpr int32 MaxLen = 1024;
-			if (Joined.Len() > MaxLen)
-			{ Joined = Joined.Left(MaxLen) + TEXT(" ..."); }
+			const FString Joined = JoinTruncated(UnlockOutcome.ErrorMessages);
 
 			Result.ErrorMessages.Add(FText::Format(
 				LOCTEXT("DeleteUnlockFailed",
@@ -182,6 +187,11 @@ namespace gitlink::cmd
 		Result.UpdatedStates.Reserve(InFiles.Num());
 		for (const FString& File : InFiles)
 		{
+			// No predictive state for files whose deletion failed — the cache keeps whatever it
+			// had, and the next UpdateStatus reflects the on-disk truth.
+			if (FailedFiles.Contains(File))
+			{ continue; }
+
 			FGitLink_FileStateRef NewState = Make_FileState(
 				Normalize_AbsolutePath(File),
 				EGitLink_FileState::Deleted,

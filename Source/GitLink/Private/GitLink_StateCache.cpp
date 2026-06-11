@@ -91,12 +91,6 @@ auto FGitLink_StateCache::Set_FileState(const FString& InFilename, FGitLink_File
 	_FileStates.Add(Key, MoveTemp(InState));
 }
 
-auto FGitLink_StateCache::Remove_FileState(const FString& InFilename) -> bool
-{
-	FWriteScopeLock Write(_FileStatesLock);
-	return _FileStates.Remove(InFilename) > 0;
-}
-
 auto FGitLink_StateCache::Enumerate_FileStates(TFunctionRef<bool(const FGitLink_FileStateRef&)> InPredicate) const
 	-> TArray<FGitLink_FileStateRef>
 {
@@ -176,33 +170,9 @@ auto FGitLink_StateCache::Enumerate_Changelists() const -> TArray<FGitLink_Chang
 }
 
 // --------------------------------------------------------------------------------------------------------------------
-// Ignore-force refresh
-// --------------------------------------------------------------------------------------------------------------------
-auto FGitLink_StateCache::Add_IgnoreForceRefresh(const FString& InFilename) -> bool
-{
-	FScopeLock Lock(&_IgnoreForceLock);
-	bool bAlreadyPresent = false;
-	_IgnoreForceRefresh.Add(InFilename, &bAlreadyPresent);
-	return !bAlreadyPresent;
-}
-
-auto FGitLink_StateCache::Remove_IgnoreForceRefresh(const FString& InFilename) -> bool
-{
-	FScopeLock Lock(&_IgnoreForceLock);
-	return _IgnoreForceRefresh.Remove(InFilename) > 0;
-}
-
-auto FGitLink_StateCache::ShouldIgnoreForceRefresh(const FString& InFilename) const -> bool
-{
-	FScopeLock Lock(&_IgnoreForceLock);
-	return _IgnoreForceRefresh.Contains(InFilename);
-}
-
-// --------------------------------------------------------------------------------------------------------------------
 auto FGitLink_StateCache::Clear() -> void
 {
 	{ FWriteScopeLock W(_FileStatesLock);        _FileStates.Empty();         }
 	{ FWriteScopeLock W(_ChangelistStatesLock);  _ChangelistStates.Empty();   }
-	{ FScopeLock      L(&_IgnoreForceLock);      _IgnoreForceRefresh.Empty(); }
 	{ FWriteScopeLock W(_SubmodulePathsLock);    _SubmodulePaths.Empty();     }
 }

@@ -79,30 +79,9 @@ namespace gitlink::cmd
 			static_cast<const FGitLink_Changelist*>(InCtx.DestinationChangelist.Get());
 		const FString DestName = DestCL->Get_Name();
 
-		// Convert absolute paths to repo-relative for libgit2.
-		TArray<FString> RelativePaths;
-		RelativePaths.Reserve(InFiles.Num());
-		for (const FString& File : InFiles)
-		{
-			RelativePaths.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, File));
-		}
-
-		FResult OpResult;
-		if (DestName == FGitLink_Changelist::StagedChangelist.Get_Name())
-		{
-			// Working → Staged = git add
-			OpResult = InCtx.Repository->Stage(RelativePaths);
-			UE_LOG(LogGitLink, Log,
-				TEXT("Cmd_MoveToChangelist: staged %d file(s)"), RelativePaths.Num());
-		}
-		else if (DestName == FGitLink_Changelist::WorkingChangelist.Get_Name())
-		{
-			// Staged → Working = git restore --staged (unstage)
-			OpResult = InCtx.Repository->Unstage(RelativePaths);
-			UE_LOG(LogGitLink, Log,
-				TEXT("Cmd_MoveToChangelist: unstaged %d file(s)"), RelativePaths.Num());
-		}
-		else
+		const bool bToStaged  = DestName == FGitLink_Changelist::StagedChangelist.Get_Name();
+		const bool bToWorking = DestName == FGitLink_Changelist::WorkingChangelist.Get_Name();
+		if (!bToStaged && !bToWorking)
 		{
 			// Named changelists — stub for now (persistence layer pending).
 			UE_LOG(LogGitLink, Log,
@@ -111,9 +90,54 @@ namespace gitlink::cmd
 			return FCommandResult::Ok();
 		}
 
-		if (!OpResult)
+		// Partition by repo and stage/unstage against the owning repository (Pitfall #5 —
+		// "always partition first"). The previous code converted every path relative to the
+		// OUTER root and ran against the outer index, so moving a submodule file between
+		// changelists was a silent no-op (the outer-root-relative path points inside a gitlink
+		// entry and matches nothing).
+		TArray<FString> BatchErrors;
+		const TArray<FRepoBatch> Batches = PartitionByRepo(InCtx, InFiles);
+		for (const FRepoBatch& Batch : Batches)
 		{
-			return FCommandResult::Fail(FText::FromString(OpResult.ErrorMessage));
+			TUniquePtr<gitlink::FRepository> SubRepo;
+			gitlink::IRepository* TargetRepo = InCtx.Repository.Get();
+			if (Batch.bIsSubmodule)
+			{
+				SubRepo = InCtx.Provider.Open_SubmoduleRepositoryFor(Batch.AbsoluteFiles[0]);
+				if (!SubRepo.IsValid())
+				{
+					BatchErrors.Add(FString::Printf(
+						TEXT("could not open submodule repo at '%s'"), *Batch.RepoRoot));
+					continue;
+				}
+				TargetRepo = SubRepo.Get();
+			}
+
+			// Working → Staged = git add; Staged → Working = git restore --staged.
+			const FResult OpResult = bToStaged
+				? TargetRepo->Stage(Batch.RelativeFiles)
+				: TargetRepo->Unstage(Batch.RelativeFiles);
+
+			if (!OpResult)
+			{
+				BatchErrors.Add(FString::Printf(
+					TEXT("%s in '%s' failed: %s"),
+					bToStaged ? TEXT("stage") : TEXT("unstage"),
+					*Batch.RepoRoot, *OpResult.ErrorMessage));
+				continue;
+			}
+
+			UE_LOG(LogGitLink, Log,
+				TEXT("Cmd_MoveToChangelist: %s %d file(s) in '%s'"),
+				bToStaged ? TEXT("staged") : TEXT("unstaged"),
+				Batch.RelativeFiles.Num(), *Batch.RepoRoot);
+		}
+
+		if (!BatchErrors.IsEmpty())
+		{
+			return FCommandResult::Fail(FText::Format(
+				LOCTEXT("MoveFailed", "GitLink: move to changelist failed: {0}"),
+				FText::FromString(JoinTruncated(BatchErrors))));
 		}
 
 		// Re-scan and return changelist states so the View Changes window refreshes
@@ -136,6 +160,15 @@ namespace gitlink::cmd
 		// Run a fresh git status snapshot instead of reading the (potentially stale) file state
 		// cache. This ensures View Changes reflects the working tree as it is RIGHT NOW, not as
 		// it was the last time Cmd_Connect or Cmd_UpdateStatus ran.
+		//
+		// KNOWN LIMITATION: outer-repo only. Dirty files inside submodules don't appear in
+		// View Changes (and therefore can't be submitted from a changelist) — they're still
+		// fully serviceable via the content browser (right-click Check In with explicit files).
+		// Walking every submodule here is deliberately avoided: this command runs on every
+		// background poll AND every post-save immediate poll, and a per-submodule status walk
+		// per refresh is exactly the CPU spike the v0.3.3 sweep throttle removed. A fix needs
+		// either throttle-aware caching of per-submodule status or an explicit user-triggered
+		// refresh path.
 		const FStatus Snapshot = InCtx.Repository->Get_Status();
 
 		TMap<FString, FGitLink_CompositeState> CompositeByPath;

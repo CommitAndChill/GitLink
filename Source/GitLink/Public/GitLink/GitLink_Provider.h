@@ -7,6 +7,8 @@
 #include <ISourceControlProvider.h>
 #include <Runtime/Launch/Resources/Version.h>
 
+#include <atomic>
+
 namespace gitlink { class FRepository; }
 class FGitLink_StateCache;
 class FGitLink_CommandDispatcher;
@@ -16,11 +18,56 @@ class FGitLink_BackgroundPoll;
 class FGitLink_Menu;
 
 // --------------------------------------------------------------------------------------------------------------------
+// FGitLink_ConnectSnapshot — immutable bundle of the repository metadata discovered at connect
+// time (CheckRepositoryStatus). Published as a TSharedPtr<const ...> with a single guarded
+// pointer swap, so async command bodies on worker threads can read submodule paths, tracked
+// sets, lockable extensions and identity strings without racing the game thread's
+// Init(force=true) rebuild. Never mutate a published snapshot — build a fresh one and re-publish.
+//
+// Why this exists: the editor fires Init(force=true) repeatedly (CLAUDE.md Pitfall #4), and
+// CheckRepositoryStatus used to Reset()+repopulate these containers in place on the game thread
+// while Cmd_UpdateStatus / Cmd_CheckOut bodies iterated them from task-graph workers — the same
+// use-after-free shape as the v0.3.6 LFS-client crash, just on the provider's own containers.
+// --------------------------------------------------------------------------------------------------------------------
+
+struct FGitLink_ConnectSnapshot
+{
+	FString PathToRepositoryRoot;  // resolved working tree root
+	FString UserName;
+	FString UserEmail;
+	FString BranchName;
+	FString RemoteUrl;
+
+	// Extensions marked 'lockable' via .gitattributes (probed via `git check-attr lockable ...`).
+	// Each entry includes the leading dot. Empty → Is_FileLockable falls back to hardcoded UE
+	// binary extensions.
+	TArray<FString> LockableExtensions;
+
+	// Absolute paths to submodule working directories (trailing forward-slash), populated via
+	// git_submodule_foreach.
+	TArray<FString> SubmodulePaths;
+
+	// Submodules to include in per-repo LFS lock polling. As of the v0.2.0 submodule-lock fix
+	// this is the ENTIRE SubmodulePaths set — the old `.gitattributes` peek missed submodules
+	// with nested attribute files, and a missed submodule meant its locks never appeared across
+	// editor restarts. Endpoint resolution silently no-ops for non-LFS submodules, so polling
+	// everything is bounded in cost.
+	TArray<FString> LfsSubmodulePaths;
+
+	// Per-submodule tracked-file sets, keyed by absolute submodule root (with trailing /).
+	// Values are repo-relative tracked paths, lower-cased for case-insensitive lookup on
+	// Windows. Refreshed only on full reconnect — a file added to a submodule's index between
+	// connects won't appear here, but the next UpdateStatus full sweep stamps the real Tree
+	// state regardless.
+	TMap<FString, TSet<FString>> SubmoduleTrackedSets;
+};
+
+// --------------------------------------------------------------------------------------------------------------------
 // FGitLink_Provider — libgit2-backed ISourceControlProvider.
 //
 // Owned by FGitLinkModule (as a direct member, not a TUniquePtr, so the address stays stable for
 // IModularFeatures registration). Init() opens the gitlink::FRepository; Execute() dispatches
-// operations via FGitLink_CommandDispatcher (stubbed to Succeeded in this pass).
+// operations via FGitLink_CommandDispatcher.
 // --------------------------------------------------------------------------------------------------------------------
 
 class GITLINK_API FGitLink_Provider final : public ISourceControlProvider
@@ -123,17 +170,24 @@ public:
 	// GitLink helpers ------------------------------------------------------------------------------------------------
 
 	auto Get_StateCache() -> FGitLink_StateCache&;
-	auto Get_Repository() const -> gitlink::FRepository*;
 
-	// Subprocess + LFS HTTP client accessors return shared ownership handles. The provider is
-	// the primary owner (constructed in CheckRepositoryStatus, dropped in Close) but commands
-	// that fan their bodies out across worker threads (Cmd_UpdateStatus, Cmd_Connect) must
-	// snapshot the TSharedPtr into a local *before* the parallel-for so an `Init(force=true)`
-	// teardown mid-sweep can't free the underlying object while a worker is dereferencing it.
-	// Returning a raw pointer here previously caused a TScopeLock use-after-free crash on
-	// FGitLink_LfsHttpClient's mutex; see the v0.3.6 entry in CLAUDE.md's Version log.
+	// Repository / subprocess / LFS HTTP client accessors return shared ownership handles. The
+	// provider is the primary owner (constructed in CheckRepositoryStatus, dropped in Close) but
+	// async command bodies and commands that fan out across worker threads must hold the
+	// TSharedPtr for as long as they dereference the object, so an `Init(force=true)` teardown
+	// mid-command can't free it out from under them. Returning a raw pointer here previously
+	// caused use-after-free crashes — on the LFS client's mutex (v0.3.6) and on the repository
+	// handle held by in-flight async command bodies across a reconnect (the v0.3.10 follow-up).
+	// MUST be called on the game thread (the TSharedPtr slot itself is reassigned there with no
+	// lock); the dispatcher snapshots them into FCommandContext before launching the async body.
+	auto Get_Repository()    const -> TSharedPtr<gitlink::FRepository>;
 	auto Get_Subprocess()    const -> TSharedPtr<FGitLink_Subprocess>;
 	auto Get_LfsHttpClient() const -> TSharedPtr<FGitLink_LfsHttpClient>;
+
+	// Immutable snapshot of connect-time metadata. Safe to call from any thread; returns null
+	// when no repository is open. Callers doing several related queries should grab the
+	// snapshot once and reuse it (each public helper below grabs its own otherwise).
+	auto Get_ConnectSnapshot() const -> TSharedPtr<const FGitLink_ConnectSnapshot>;
 
 	// True when LFS is installed (git lfs version succeeded at connect time) AND the user
 	// has bUseLfsLocking enabled in the plugin settings. Drives UsesCheckout().
@@ -142,15 +196,16 @@ public:
 
 	// True when the file's extension matches a wildcard from .gitattributes marked with the
 	// 'lockable' attribute. Populated once at connect time by probing via
-	// `git check-attr lockable *.uasset *.umap ...`.
+	// `git check-attr lockable *.uasset *.umap ...`. Thread-safe (reads the connect snapshot).
 	auto Is_FileLockable(const FString& InAbsolutePath) const -> bool;
 
 	// True when the file lives inside a git submodule.
 	// Submodule files should not be checked out / checked in from the parent repo.
+	// Thread-safe (reads the connect snapshot).
 	auto Is_InSubmodule(const FString& InAbsolutePath) const -> bool;
 
 	// Returns the absolute path to the submodule root containing this file, or empty if
-	// the file is not in a submodule.
+	// the file is not in a submodule. Thread-safe (reads the connect snapshot).
 	auto Get_SubmoduleRoot(const FString& InAbsolutePath) const -> FString;
 
 	// Opens a fresh FRepository rooted at the submodule that contains InAbsolutePath.
@@ -163,29 +218,30 @@ public:
 
 	// Snapshot of the absolute submodule working-tree paths discovered at connect time.
 	// Each entry has a trailing forward-slash. Used by Cmd_UpdateStatus / Cmd_Connect to
-	// iterate over submodules for per-submodule LFS lock polling.
-	auto Get_SubmodulePaths() const -> TArray<FString> { return _SubmodulePaths; }
+	// iterate over submodules for per-submodule LFS lock polling. Thread-safe.
+	auto Get_SubmodulePaths() const -> TArray<FString>;
 
-	// Subset of Get_SubmodulePaths that have LFS configured (i.e. contain `filter=lfs` or
-	// `lockable` patterns in their .gitattributes). Used to scope the per-poll LFS lock
-	// query to repos that actually have lockable content — most submodules in a typical
-	// project (source-only plugins, etc.) don't have LFS at all, and polling them costs
-	// a network round-trip per poll for nothing. Probed once at connect time.
-	auto Get_LfsSubmodulePaths() const -> TArray<FString> { return _LfsSubmodulePaths; }
+	// Submodules included in per-repo LFS lock polling. As of the v0.2.0 submodule-lock fix
+	// this is the ENTIRE submodule set (see FGitLink_ConnectSnapshot::LfsSubmodulePaths for
+	// why the old `.gitattributes` filter was dropped). Thread-safe.
+	auto Get_LfsSubmodulePaths() const -> TArray<FString>;
 
 	// True when the given absolute path is a tracked file inside one of the submodules.
 	// Populated at connect time by enumerating each submodule's git index. Used by GetState
 	// to decide whether a brand-new submodule file query should default to Tree=Unmodified
 	// (tracked file the parent's status walk can't see) or Tree=NotInRepo (untracked file —
 	// must NOT be offered for checkout, fixes the "new file in submodule prompts to lock"
-	// bug). Case-insensitive lookup.
+	// bug). Case-insensitive lookup. Thread-safe (reads the connect snapshot).
 	auto Is_TrackedInSubmodule(const FString& InAbsolutePath) const -> bool;
 
-	auto Get_PathToRepositoryRoot() const -> const FString& { return _PathToRepositoryRoot; }
-	auto Get_UserName()             const -> const FString& { return _UserName; }
-	auto Get_UserEmail()            const -> const FString& { return _UserEmail; }
-	auto Get_BranchName()           const -> const FString& { return _BranchName; }
-	auto Get_RemoteUrl()            const -> const FString& { return _RemoteUrl; }
+	// Connect-time metadata accessors. Return by value from the immutable connect snapshot so
+	// they're safe to call from worker threads while the game thread re-runs
+	// CheckRepositoryStatus. Empty when no repository is open.
+	auto Get_PathToRepositoryRoot() const -> FString;
+	auto Get_UserName()             const -> FString;
+	auto Get_UserEmail()            const -> FString;
+	auto Get_BranchName()           const -> FString;
+	auto Get_RemoteUrl()            const -> FString;
 
 	// Fire the OnSourceControlStateChanged delegate so the editor re-queries state for visible
 	// files. Called from the dispatcher on the game thread after merging command results into
@@ -203,6 +259,10 @@ public:
 	// signal at once. The HTTP probe runs on a background thread; cache mutation +
 	// OnSourceControlStateChanged dispatch happen on the game thread.
 	auto Request_LockRefreshForFile(const FString& InAbsolutePath) -> void;
+
+	// Most recent repository-open failure from CheckRepositoryStatus, for surfacing in the
+	// Connect dialog. Empty if the last open succeeded. Thread-safe.
+	auto Get_LastConnectError() const -> FText;
 
 	// Records that a local lock-state-changing op just succeeded for this file
 	// (Cmd_CheckOut → Locked, or Cmd_Revert/CheckIn/Delete unlock → NotLocked).
@@ -229,50 +289,38 @@ private:
 	// and requests an immediate background poll so View Changes updates quickly.
 	auto OnPackageSaved(const FString& InFilename) -> void;
 
-	TUniquePtr<gitlink::FRepository>       _Repository;
-	TUniquePtr<FGitLink_StateCache>        _StateCache;
-	TUniquePtr<FGitLink_CommandDispatcher> _Dispatcher;  // constructed empty in Pass B
-	// Subprocess + LFS HTTP client are held as TSharedPtr so commands that fan out across
-	// worker threads can snapshot a refcounted handle and keep the underlying object alive
-	// across a concurrent Close() / Reset(). Provider is the primary owner; the secondary
-	// references are short-lived (one per in-flight parallel command). See Get_LfsHttpClient()
-	// comment above and the v0.3.6 entry in CLAUDE.md.
+	// Repository, subprocess and LFS HTTP client are held as TSharedPtr so async command bodies
+	// (and commands that fan out across worker threads) hold a refcounted handle that keeps the
+	// underlying object alive across a concurrent Close() / Reset(). Provider is the primary
+	// owner; the secondary references are short-lived (one per in-flight command). The
+	// TSharedPtr slots themselves are only reassigned on the game thread, and Get_* accessors
+	// must only be called there (the dispatcher snapshots them into FCommandContext on the game
+	// thread before launching the async body). See v0.3.6 / v0.3.10-follow-up in CLAUDE.md.
+	TSharedPtr<gitlink::FRepository>       _Repository;     // present once a repo is open
 	TSharedPtr<FGitLink_Subprocess>        _Subprocess;     // present once a repo is open
 	TSharedPtr<FGitLink_LfsHttpClient>     _LfsHttpClient;  // present once a repo is open
+	TUniquePtr<FGitLink_StateCache>        _StateCache;
+	TUniquePtr<FGitLink_CommandDispatcher> _Dispatcher;
 	TUniquePtr<FGitLink_BackgroundPoll>    _BackgroundPoll;
 	TUniquePtr<FGitLink_Menu>              _Menu;
 
-	bool _bGitRepositoryFound          = false;
-	bool _bLfsAvailable                = false;
-	bool _bHasPreCommitOrCommitMsgHook = false;  // from HookProbe at connect time
+	// std::atomic because worker-thread code (Request_LockRefreshForFile fired from
+	// Cmd_UpdateStatus's explicit-file branch, command predicates) reads these while the game
+	// thread rebuilds the connection.
+	std::atomic<bool> _bGitRepositoryFound{false};
+	std::atomic<bool> _bLfsAvailable{false};
+	std::atomic<bool> _bHasPreCommitOrCommitMsgHook{false};  // from HookProbe at connect time
 
-	// Extensions marked 'lockable' via .gitattributes. Populated at Connect time by running
-	// `git check-attr lockable *.uasset *.umap ...`. Each entry includes the leading dot.
-	TArray<FString> _LockableExtensions;
+	// Immutable connect-time metadata, published by CheckRepositoryStatus with a guarded
+	// pointer swap and cleared in Close(). Read via Get_ConnectSnapshot() from any thread.
+	mutable FCriticalSection                    _ConnectSnapshotLock;
+	TSharedPtr<const FGitLink_ConnectSnapshot>  _ConnectSnapshot;
 
-	// Absolute paths to submodule working directories, populated at connect time via
-	// git_submodule_foreach. Used by Is_InSubmodule to detect files that should not
-	// be checked out / checked in from the parent repo.
-	TArray<FString> _SubmodulePaths;
-
-	// Subset of _SubmodulePaths whose .gitattributes mentions LFS (filter=lfs or lockable).
-	// Populated at connect time. Used to scope per-poll LFS lock queries.
-	TArray<FString> _LfsSubmodulePaths;
-
-	// Per-submodule tracked-file sets, keyed by absolute submodule root (with trailing /).
-	// Each value is the set of repo-relative tracked paths in that submodule's git index,
-	// stored lower-cased for case-insensitive lookup on Windows. Populated at connect time
-	// alongside _SubmodulePaths and consumed by Is_TrackedInSubmodule + GetState. Empty
-	// for repos without submodules. Refreshed only on full reconnect — adding a new file
-	// to a submodule's index between connects won't be reflected here, but the next
-	// UpdateStatus full sweep stamps the real Tree state regardless.
-	TMap<FString, TSet<FString>> _SubmoduleTrackedSets;
-
-	FString _PathToRepositoryRoot;  // resolved working tree root
-	FString _UserName;
-	FString _UserEmail;
-	FString _BranchName;
-	FString _RemoteUrl;
+	// Liveness token for game-thread continuations queued by Request_LockRefreshForFile.
+	// Captured by value so the copy outlives the provider; flipped false at engine-exit Close()
+	// (and in the destructor) so a continuation that fires after teardown no-ops instead of
+	// touching freed provider state. Same mechanics as the dispatcher's _Alive token (v0.3.10).
+	TSharedRef<std::atomic<bool>> _ProviderAlive = MakeShared<std::atomic<bool>>(true);
 
 	FSourceControlStateChanged _OnSourceControlStateChanged;
 	FDelegateHandle _PackageSavedHandle;
@@ -296,6 +344,9 @@ private:
 	mutable FCriticalSection _RecentLocalLockOpsLock;
 	TMap<FString, double>    _RecentLocalLockOps;
 
-	mutable FCriticalSection _LastErrorsLock;
-	TArray<FText> _LastErrors;
+	// Most recent connect failure, surfaced via the log. Overwritten (not appended) on each
+	// failed CheckRepositoryStatus so repeated Init(force=true) retries on a machine without a
+	// repo can't grow it unboundedly.
+	mutable FCriticalSection _LastErrorLock;
+	FText _LastError;
 };

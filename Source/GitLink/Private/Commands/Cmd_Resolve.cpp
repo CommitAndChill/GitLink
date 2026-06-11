@@ -36,21 +36,64 @@ namespace gitlink::cmd
 
 		UE_LOG(LogGitLink, Log, TEXT("Cmd_Resolve: resolving %d file(s)"), InFiles.Num());
 
-		const FResult StageRes = InCtx.Repository->Stage(InFiles);
-		if (!StageRes)
+		// Partition by repo and stage REPO-RELATIVE paths against the owning repository.
+		// The previous code passed the editor's absolute paths straight into the outer repo's
+		// Stage() — git_index_add_all matches pathspecs repo-relative, so the resolve silently
+		// staged nothing (Pitfall #2), and conflicted files inside submodules were staged
+		// against the wrong repo entirely.
+		FCommandResult Result = FCommandResult::Ok();
+		TSet<FString> FailedFiles;
+		TArray<FString> BatchErrors;
+
+		const TArray<FRepoBatch> Batches = PartitionByRepo(InCtx, InFiles);
+		for (const FRepoBatch& Batch : Batches)
 		{
-			UE_LOG(LogGitLink, Warning,
-				TEXT("Cmd_Resolve: Stage failed: %s"), *StageRes.ErrorMessage);
-			return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
+			TUniquePtr<gitlink::FRepository> SubRepo;
+			gitlink::FRepository* TargetRepo = InCtx.Repository.Get();
+			if (Batch.bIsSubmodule)
+			{
+				SubRepo = InCtx.Provider.Open_SubmoduleRepositoryFor(Batch.AbsoluteFiles[0]);
+				if (!SubRepo.IsValid())
+				{
+					FailedFiles.Append(Batch.AbsoluteFiles);
+					BatchErrors.Add(FString::Printf(
+						TEXT("could not open submodule repo at '%s'"), *Batch.RepoRoot));
+					continue;
+				}
+				TargetRepo = SubRepo.Get();
+			}
+
+			const FResult StageRes = TargetRepo->Stage(Batch.RelativeFiles);
+			if (!StageRes)
+			{
+				UE_LOG(LogGitLink, Warning,
+					TEXT("Cmd_Resolve: Stage in '%s' failed: %s"),
+					*Batch.RepoRoot, *StageRes.ErrorMessage);
+				FailedFiles.Append(Batch.AbsoluteFiles);
+				BatchErrors.Add(FString::Printf(
+					TEXT("staging in '%s' failed: %s"), *Batch.RepoRoot, *StageRes.ErrorMessage));
+			}
+		}
+
+		if (!BatchErrors.IsEmpty())
+		{
+			Result.bOk = false;
+			Result.ErrorMessages.Add(FText::Format(
+				LOCTEXT("ResolveFailed", "Failed to mark {0} file(s) resolved: {1}"),
+				FText::AsNumber(FailedFiles.Num()),
+				FText::FromString(JoinTruncated(BatchErrors))));
 		}
 
 		// After resolving, the file is staged as Modified (or Added if it was new). We can't
 		// tell which without re-querying status, so we report Modified/Staged — the editor
 		// will call UpdateStatus afterward to refresh if it cares about the distinction.
-		FCommandResult Result = FCommandResult::Ok();
+		// Files whose staging failed keep their cached (Conflicted) state.
 		Result.UpdatedStates.Reserve(InFiles.Num());
 		for (const FString& File : InFiles)
 		{
+			if (FailedFiles.Contains(File))
+			{ continue; }
+
 			Result.UpdatedStates.Add(Make_FileState(
 				Normalize_AbsolutePath(File),
 				EGitLink_FileState::Modified,
