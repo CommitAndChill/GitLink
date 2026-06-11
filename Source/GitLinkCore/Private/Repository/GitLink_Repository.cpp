@@ -23,7 +23,10 @@ namespace gitlink
 {
 	namespace
 	{
-		FString GLastOpenError;
+		// Thread-local because Open runs concurrently from status-sweep workers (one fresh open per
+		// submodule) and concurrent FString assignment is a data race. The error is only meaningful
+		// to the thread whose Open call just failed, so per-thread storage preserves the contract.
+		static thread_local FString GLastOpenError;
 
 		auto NotImplemented(const TCHAR* InOp) -> FResult
 		{
@@ -142,23 +145,26 @@ namespace gitlink
 		const int32 Rc = git_repository_head(&RawHead, _Repo);
 		if (Rc < 0 || RawHead == nullptr)
 		{
-			// Detached HEAD, unborn branch, empty repo, etc. — not a caller-facing error.
+			// Unborn branch, empty repo, missing HEAD — not a caller-facing error.
 			if (RawHead) { git_reference_free(RawHead); }
 			return FString();
 		}
 
 		libgit2::FReferencePtr Head(RawHead);
 
+		// git_repository_head SUCCEEDS on detached HEAD (it hands back the resolved direct ref), so
+		// detached must be detected here. Returning empty — rather than a non-branch ref name like
+		// "HEAD" — lets callers such as PushRemote fire their clear detached/unborn guard instead of
+		// building a bogus refspec.
+		if (git_reference_is_branch(Head.Get()) == 0)
+		{
+			return FString();
+		}
+
 		const char* ShortName = nullptr;
 		if (git_branch_name(&ShortName, Head.Get()) == 0 && ShortName != nullptr)
 		{
 			return FString(UTF8_TO_TCHAR(ShortName));
-		}
-
-		// Fallback: the full reference name.
-		if (const char* FullName = git_reference_name(Head.Get()))
-		{
-			return FString(UTF8_TO_TCHAR(FullName));
 		}
 
 		return FString();

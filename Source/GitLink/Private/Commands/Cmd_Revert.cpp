@@ -23,10 +23,9 @@
 // nothing to check out. For those, we additionally call Unstage to drop the index entry.
 //
 // Submodule files: input batch is partitioned by submodule root. Files inside a submodule
-// are reverted against a freshly-opened FRepository for that submodule (Unstage + DiscardChanges).
-// LFS unlock and read-only re-stamping are skipped for submodule files — they were never
-// locked through GitLink (parent's LFS server doesn't manage them) and the read-only flag
-// would block the user's subsequent edits in the submodule.
+// are reverted against a freshly-opened FRepository for that submodule (Unstage + DiscardChanges),
+// and unlocked against that submodule's own LFS server via Release_LfsLocksBestEffort's
+// per-repo routing (v0.2.0). Read-only re-stamping applies uniformly to all reverted files.
 // --------------------------------------------------------------------------------------------------------------------
 
 namespace gitlink::cmd
@@ -101,109 +100,53 @@ namespace gitlink::cmd
 
 		UE_LOG(LogGitLink, Log, TEXT("Cmd_Revert: reverting %d file(s)"), InFiles.Num());
 
-		// Separate files into two buckets: those with local modifications that need a
-		// discard, and those that are only locked (checkout) but not yet modified on disk.
-		// The latter case only needs an LFS unlock — no git index/working-tree work.
-		TArray<FString> ModifiedFiles;
-		TArray<FString> LockedOnlyFiles;
-		ModifiedFiles.Reserve(InFiles.Num());
-		LockedOnlyFiles.Reserve(InFiles.Num());
+		// Every requested file goes into the discard set — DiscardChanges is a no-op for files
+		// that match HEAD, so there's nothing to save by filtering. An earlier revision
+		// classified files via the state cache and SKIPPED the discard for cached-clean-but-
+		// locked files; with a stale cache (file modified since the last sweep) that skipped
+		// the actual revert, released the lock, and stamped Unmodified — a revert that
+		// reverted nothing while reporting success.
+		//
+		// Files whose repo couldn't be opened or whose discard failed are tracked and excluded
+		// from the unlock pass (releasing a lock while un-reverted changes sit on disk is a
+		// lock-discipline violation) and from the clean-state stamping below.
+		TSet<FString> FailedFiles;
+		TArray<FString> BatchErrors;
 
-		for (const FString& File : InFiles)
+		const TArray<FRepoBatch> Batches = PartitionByRepo(InCtx, InFiles);
+		for (const FRepoBatch& Batch : Batches)
 		{
-			const FGitLink_FileStateRef State = InCtx.StateCache.Find_FileState(File);
-			const bool bIsModified =
-				   State->_State.File == EGitLink_FileState::Added
-				|| State->_State.File == EGitLink_FileState::Deleted
-				|| State->_State.File == EGitLink_FileState::Modified
-				|| State->_State.File == EGitLink_FileState::Renamed
-				|| State->_State.File == EGitLink_FileState::Unmerged;
-
-			if (bIsModified)
+			TUniquePtr<gitlink::FRepository> SubRepo;
+			gitlink::IRepository* TargetRepo = InCtx.Repository.Get();
+			if (Batch.bIsSubmodule)
 			{
-				ModifiedFiles.Add(File);
-			}
-			else if (State->_State.Lock == EGitLink_LockState::Locked)
-			{
-				LockedOnlyFiles.Add(File);
-			}
-			else
-			{
-				// Neither modified nor locked — nothing to revert. Still emit a clean state
-				// so the editor refreshes.
-				ModifiedFiles.Add(File);  // let the discard handle it, it's harmless
-			}
-		}
-
-		// Within ModifiedFiles, partition outer vs per-submodule. Each submodule needs its
-		// own FRepository because libgit2 ops are scoped to a single repository handle.
-		TArray<FString> OuterModified;
-		TMap<FString, TArray<FString>> ModifiedBySubmoduleRoot;
-		OuterModified.Reserve(ModifiedFiles.Num());
-
-		for (const FString& File : ModifiedFiles)
-		{
-			const FString SubmoduleRoot = InCtx.Provider.Get_SubmoduleRoot(File);
-			if (SubmoduleRoot.IsEmpty())
-			{ OuterModified.Add(File); }
-			else
-			{ ModifiedBySubmoduleRoot.FindOrAdd(SubmoduleRoot).Add(File); }
-		}
-
-		// Outer repo: existing path.
-		if (!OuterModified.IsEmpty())
-		{
-			TArray<FString> RelativeModified;
-			RelativeModified.Reserve(OuterModified.Num());
-			for (const FString& Abs : OuterModified)
-			{
-				RelativeModified.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, Abs));
+				SubRepo = InCtx.Provider.Open_SubmoduleRepositoryFor(Batch.AbsoluteFiles[0]);
+				if (!SubRepo.IsValid())
+				{
+					UE_LOG(LogGitLink, Warning,
+						TEXT("Cmd_Revert: could not open submodule repo at '%s' — skipping %d file(s)"),
+						*Batch.RepoRoot, Batch.AbsoluteFiles.Num());
+					FailedFiles.Append(Batch.AbsoluteFiles);
+					BatchErrors.Add(FString::Printf(
+						TEXT("could not open submodule repo at '%s'"), *Batch.RepoRoot));
+					continue;
+				}
+				TargetRepo = SubRepo.Get();
 			}
 
-			const FResult DiscardRes = DiscardForRepo(*InCtx.Repository, RelativeModified);
+			const FResult DiscardRes = DiscardForRepo(*TargetRepo, Batch.RelativeFiles);
 			if (!DiscardRes)
 			{
 				UE_LOG(LogGitLink, Warning,
-					TEXT("Cmd_Revert: outer DiscardChanges failed: %s"), *DiscardRes.ErrorMessage);
-				return FCommandResult::Fail(FText::FromString(DiscardRes.ErrorMessage));
-			}
-
-			RehydrateLfsForRepo(InCtx, FString(), RelativeModified);
-		}
-
-		// Each submodule bucket: open inner repo, discard there.
-		for (const TPair<FString, TArray<FString>>& Pair : ModifiedBySubmoduleRoot)
-		{
-			const FString& SubmoduleRoot = Pair.Key;
-			const TArray<FString>& SubFiles = Pair.Value;
-
-			TUniquePtr<gitlink::FRepository> SubRepo =
-				InCtx.Provider.Open_SubmoduleRepositoryFor(SubFiles[0]);
-			if (!SubRepo.IsValid())
-			{
-				UE_LOG(LogGitLink, Warning,
-					TEXT("Cmd_Revert: could not open submodule repo at '%s' — skipping %d file(s)"),
-					*SubmoduleRoot, SubFiles.Num());
+					TEXT("Cmd_Revert: DiscardChanges in '%s' failed: %s"),
+					*Batch.RepoRoot, *DiscardRes.ErrorMessage);
+				FailedFiles.Append(Batch.AbsoluteFiles);
+				BatchErrors.Add(FString::Printf(
+					TEXT("discard in '%s' failed: %s"), *Batch.RepoRoot, *DiscardRes.ErrorMessage));
 				continue;
 			}
 
-			TArray<FString> SubRelative;
-			SubRelative.Reserve(SubFiles.Num());
-			for (const FString& Abs : SubFiles)
-			{
-				SubRelative.Add(ToRepoRelativePath(SubmoduleRoot, Abs));
-			}
-
-			const FResult SubDiscardRes = DiscardForRepo(*SubRepo, SubRelative);
-			if (!SubDiscardRes)
-			{
-				UE_LOG(LogGitLink, Warning,
-					TEXT("Cmd_Revert: submodule '%s' DiscardChanges failed: %s"),
-					*SubmoduleRoot, *SubDiscardRes.ErrorMessage);
-				return FCommandResult::Fail(FText::FromString(SubDiscardRes.ErrorMessage));
-			}
-
-			RehydrateLfsForRepo(InCtx, SubmoduleRoot, SubRelative);
+			RehydrateLfsForRepo(InCtx, Batch.bIsSubmodule ? Batch.RepoRoot : FString(), Batch.RelativeFiles);
 		}
 
 		// Release any LFS locks we held — Release_LfsLocksBestEffort partitions by repo so
@@ -214,15 +157,26 @@ namespace gitlink::cmd
 		// rejected). We intentionally do NOT stamp Lock=NotLocked on failed files —
 		// previously the cache flipped to NotLocked while the server lock persisted,
 		// hiding the failure and leaving the file permanently stuck.
-		const FLfsUnlockOutcome UnlockOutcome = Release_LfsLocksBestEffort(InCtx, InFiles);
+		//
+		// Only successfully-discarded files are unlocked: a file whose discard failed still
+		// has the user's changes on disk, so the lock must stay held.
+		TArray<FString> UnlockCandidates;
+		UnlockCandidates.Reserve(InFiles.Num());
+		for (const FString& File : InFiles)
+		{
+			if (!FailedFiles.Contains(File))
+			{ UnlockCandidates.Add(File); }
+		}
+
+		const FLfsUnlockOutcome UnlockOutcome = Release_LfsLocksBestEffort(InCtx, UnlockCandidates);
 		const TSet<FString> FailedSet(UnlockOutcome.FailedPaths);
 
 		// Restore the read-only flag on lockable reverted files to match the un-checked-out
-		// state. Skip files whose unlock failed — leaving them writable matches reality
-		// (user still holds the lock conceptually) and avoids masking the failure.
+		// state. Skip files whose discard or unlock failed — leaving them writable matches
+		// reality (user still holds the lock conceptually) and avoids masking the failure.
 		for (const FString& File : InFiles)
 		{
-			if (FailedSet.Contains(File))
+			if (FailedSet.Contains(File) || FailedFiles.Contains(File))
 			{ continue; }
 			if (InCtx.Provider.Is_FileLockable(File) && FPaths::FileExists(File))
 			{
@@ -231,26 +185,26 @@ namespace gitlink::cmd
 		}
 
 		UE_LOG(LogGitLink, Log,
-			TEXT("Cmd_Revert: reverted %d modified, %d locked-only file(s); unlock failed for %d file(s)"),
-			ModifiedFiles.Num(), LockedOnlyFiles.Num(), UnlockOutcome.FailedPaths.Num());
+			TEXT("Cmd_Revert: reverted %d of %d file(s); discard failed for %d, unlock failed for %d"),
+			InFiles.Num() - FailedFiles.Num(), InFiles.Num(),
+			FailedFiles.Num(), UnlockOutcome.FailedPaths.Num());
 
 		FCommandResult Result = FCommandResult::Ok();
+
+		if (!BatchErrors.IsEmpty())
+		{
+			Result.bOk = false;
+			Result.ErrorMessages.Add(FText::Format(
+				LOCTEXT("RevertDiscardFailed",
+					"Failed to revert {0} file(s); their local changes are untouched and any LFS "
+					"locks on them remain held. Details: {1}"),
+				FText::AsNumber(FailedFiles.Num()),
+				FText::FromString(JoinTruncated(BatchErrors))));
+		}
 
 		if (!UnlockOutcome.FailedPaths.IsEmpty())
 		{
 			Result.bOk = false;
-
-			// Aggregate every batch error into a single user-visible message. Truncate at a
-			// sane length so the toast / dialog stays readable when many batches fail.
-			FString Joined;
-			for (int32 Idx = 0; Idx < UnlockOutcome.ErrorMessages.Num(); ++Idx)
-			{
-				if (Idx > 0) { Joined += TEXT("\n"); }
-				Joined += UnlockOutcome.ErrorMessages[Idx];
-			}
-			constexpr int32 MaxLen = 1024;
-			if (Joined.Len() > MaxLen)
-			{ Joined = Joined.Left(MaxLen) + TEXT(" ..."); }
 
 			Result.ErrorMessages.Add(FText::Format(
 				LOCTEXT("RevertUnlockFailed",
@@ -259,12 +213,17 @@ namespace gitlink::cmd
 					"Common cause: the LFS server's lock owner identity differs from `git config user.name`. "
 					"Details: {1}"),
 				FText::AsNumber(UnlockOutcome.FailedPaths.Num()),
-				FText::FromString(Joined)));
+				FText::FromString(JoinTruncated(UnlockOutcome.ErrorMessages))));
 		}
 
 		Result.UpdatedStates.Reserve(InFiles.Num());
 		for (const FString& File : InFiles)
 		{
+			// Files whose discard failed keep their cached (dirty / locked) state — the next
+			// UpdateStatus reflects the on-disk truth.
+			if (FailedFiles.Contains(File))
+			{ continue; }
+
 			// Lockability is .gitattributes-driven and uniform across outer-repo and submodule
 			// files (locking is routed to each submodule's own LFS server, but the lockable
 			// extension list is shared). Don't gate on bInSubmodule here.

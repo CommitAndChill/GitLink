@@ -205,13 +205,22 @@ auto FGitLink_Menu::Push_Clicked() -> void
 	UE_LOG(LogGitLink, Log, TEXT("GitLink_Menu: Push clicked"));
 
 	// Run git push via subprocess on a background thread — libgit2 push lacks credential wiring.
+	//
+	// LIFETIME NOTE: these lambdas capture `this` raw, and _Menu is a TUniquePtr the provider
+	// Reset()s in Close() — a push can take many seconds, so `this` may be dangling by the time
+	// the completion runs. That is currently safe ONLY because everything reached through
+	// `this` here is static (Remove_/Display_*Notification methods and the
+	// _OperationInProgressNotification member). If you add an instance member or method to
+	// these paths, switch the menu to shared ownership and capture a weak pointer first.
 	Async(EAsyncExecution::TaskGraph, [this]()
 	{
 		// Snapshot the shared subprocess handle so a concurrent Provider::Close() can't free
 		// the underlying object while this background task is mid-Run(). See v0.3.6 in CLAUDE.md.
+		// Bounded run: a wedged credential helper or dead remote must not pin this worker (and
+		// the "Pushing..." notification) forever. 10 minutes accommodates large LFS pushes.
 		TSharedPtr<FGitLink_Subprocess> Subprocess = FGitLinkModule::Get().Get_Provider().Get_Subprocess();
 		const bool bOk = Subprocess.IsValid() && Subprocess->IsValid()
-			&& Subprocess->Run({ TEXT("push") }).IsSuccess();
+			&& Subprocess->Run_Bounded({ TEXT("push") }, FString(), /*InTimeoutSec=*/ 600.0).IsSuccess();
 
 		AsyncTask(ENamedThreads::GameThread, [this, bOk]()
 		{

@@ -46,6 +46,84 @@ namespace gitlink::op
 namespace
 {
 	const FName GProviderName(TEXT("GitLink"));
+
+	// Snapshot-based query helpers. Paths must already be normalized
+	// (ConvertRelativePathToFull + NormalizeFilename); the FGitLink_Provider wrappers
+	// normalize before calling. A null snapshot means "not connected" — false/empty.
+
+	auto Snapshot_IsFileLockable(const FGitLink_ConnectSnapshot* InSnap, const FString& InPath) -> bool
+	{
+		// If check-attr found explicit 'lockable' extensions, use those.
+		if (InSnap != nullptr && !InSnap->LockableExtensions.IsEmpty())
+		{
+			for (const FString& Ext : InSnap->LockableExtensions)
+			{
+				if (InPath.EndsWith(Ext, ESearchCase::IgnoreCase))
+				{ return true; }
+			}
+			return false;
+		}
+
+		// Fallback: most UE repos use LFS for binary assets via 'filter=lfs' but omit the
+		// 'lockable' keyword from .gitattributes. We hardcode the common UE binary extensions
+		// so the checkout workflow works out of the box for typical Unreal projects.
+		static const TCHAR* DefaultLockableExts[] = {
+			TEXT(".uasset"),
+			TEXT(".umap"),
+			TEXT(".uexp"),
+			TEXT(".ubulk"),
+		};
+
+		for (const TCHAR* Ext : DefaultLockableExts)
+		{
+			if (InPath.EndsWith(Ext, ESearchCase::IgnoreCase))
+			{ return true; }
+		}
+		return false;
+	}
+
+	auto Snapshot_GetSubmoduleRoot(const FGitLink_ConnectSnapshot* InSnap, const FString& InNormalizedPath) -> FString
+	{
+		if (InSnap == nullptr)
+		{ return FString(); }
+
+		for (const FString& SubPath : InSnap->SubmodulePaths)
+		{
+			if (InNormalizedPath.StartsWith(SubPath, ESearchCase::IgnoreCase))
+			{ return SubPath; }
+		}
+		return FString();
+	}
+
+	auto Snapshot_IsInSubmodule(const FGitLink_ConnectSnapshot* InSnap, const FString& InNormalizedPath) -> bool
+	{
+		return !Snapshot_GetSubmoduleRoot(InSnap, InNormalizedPath).IsEmpty();
+	}
+
+	auto Snapshot_IsTrackedInSubmodule(const FGitLink_ConnectSnapshot* InSnap, const FString& InNormalizedPath) -> bool
+	{
+		if (InSnap == nullptr || InSnap->SubmoduleTrackedSets.IsEmpty())
+		{ return false; }
+
+		for (const TPair<FString, TSet<FString>>& Pair : InSnap->SubmoduleTrackedSets)
+		{
+			const FString& SubRoot = Pair.Key;  // has trailing forward slash
+			if (!InNormalizedPath.StartsWith(SubRoot, ESearchCase::IgnoreCase))
+			{ continue; }
+
+			FString Relative = InNormalizedPath.RightChop(SubRoot.Len());
+			Relative.ReplaceInline(TEXT("\\"), TEXT("/"));
+			Relative.RemoveFromStart(TEXT("/"));
+			Relative = Relative.ToLower();
+			if (Pair.Value.Contains(Relative))
+			{ return true; }
+
+			// File is inside this submodule but not tracked. Don't fall through to other
+			// submodules — submodule roots don't overlap.
+			return false;
+		}
+		return false;
+	}
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -55,7 +133,13 @@ FGitLink_Provider::FGitLink_Provider()
 {
 }
 
-FGitLink_Provider::~FGitLink_Provider() = default;
+FGitLink_Provider::~FGitLink_Provider()
+{
+	// Belt-and-braces: Close() already flips this at engine exit, but a destruction path that
+	// skipped Close() must still neutralize any queued game-thread continuation holding a copy
+	// of the token.
+	_ProviderAlive->store(false, std::memory_order_release);
+}
 
 // --------------------------------------------------------------------------------------------------------------------
 // Lifecycle
@@ -92,6 +176,12 @@ auto FGitLink_Provider::Close() -> void
 	if (IsEngineExitRequested() && _Dispatcher.IsValid())
 	{
 		_Dispatcher->Shutdown_AndDrain();
+
+		// Neutralize any Request_LockRefreshForFile game-thread continuation that's already
+		// queued — after Close() returns at exit, the module destroys this provider, and a
+		// continuation firing later would touch freed state. Routine reconnect Close() leaves
+		// the token alive: the provider object survives, so those continuations stay valid.
+		_ProviderAlive->store(false, std::memory_order_release);
 	}
 
 	_BackgroundPoll.Reset();
@@ -132,19 +222,18 @@ auto FGitLink_Provider::Close() -> void
 		_Menu.Reset();
 	}
 
+	// Drop the primary refs. In-flight command bodies that snapshotted these TSharedPtrs into
+	// their FCommandContext keep the objects alive until they return; we only release our share.
 	_Repository.Reset();
 	_LfsHttpClient.Reset();
 	_Subprocess.Reset();
 	_bGitRepositoryFound = false;
 	_bLfsAvailable = false;
-	_LockableExtensions.Reset();
-	_SubmodulePaths.Reset();
-	_LfsSubmodulePaths.Reset();
-	_PathToRepositoryRoot.Reset();
-	_UserName.Reset();
-	_UserEmail.Reset();
-	_BranchName.Reset();
-	_RemoteUrl.Reset();
+
+	{
+		FScopeLock Lock(&_ConnectSnapshotLock);
+		_ConnectSnapshot.Reset();
+	}
 
 	if (_StateCache.IsValid())
 	{ _StateCache->Clear(); }
@@ -152,7 +241,16 @@ auto FGitLink_Provider::Close() -> void
 
 auto FGitLink_Provider::CheckRepositoryStatus() -> void
 {
+	// Invalidate the published metadata first — worker-thread readers see "not connected"
+	// rather than a half-rebuilt view. The old snapshot object itself stays alive for anyone
+	// who already grabbed it (immutable, refcounted).
 	_bGitRepositoryFound = false;
+	{
+		FScopeLock Lock(&_ConnectSnapshotLock);
+		_ConnectSnapshot.Reset();
+	}
+	// Game-thread-only slot; in-flight command bodies hold their own TSharedPtr snapshot of
+	// the old repository, which stays valid until they return.
 	_Repository.Reset();
 
 	const UGitLink_Settings* Settings = GetDefault<UGitLink_Settings>();
@@ -166,40 +264,61 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 
 	UE_LOG(LogGitLink, Log, TEXT("CheckRepositoryStatus: opening '%s'"), *Params.Path);
 
-	_Repository = gitlink::FRepository::Open(Params);
+	_Repository = TSharedPtr<gitlink::FRepository>(gitlink::FRepository::Open(Params).Release());
 	if (!_Repository.IsValid())
 	{
 		const FString& Err = gitlink::FRepository::Get_LastOpenError();
 		UE_LOG(LogGitLink, Warning, TEXT("CheckRepositoryStatus: open failed: %s"), *Err);
 
-		FScopeLock Lock(&_LastErrorsLock);
-		_LastErrors.Add(FText::FromString(Err));
+		FScopeLock Lock(&_LastErrorLock);
+		_LastError = FText::FromString(Err);
 		return;
 	}
 
-	_bGitRepositoryFound    = true;
-	_PathToRepositoryRoot   = _Repository->Get_Path();
-	_BranchName             = _Repository->Get_CurrentBranchName();
+	{
+		// Successful open — clear any stale failure so Get_LastConnectError reflects reality.
+		FScopeLock Lock(&_LastErrorLock);
+		_LastError = FText();
+	}
+
+	// Build the connect snapshot locally and publish it in one guarded swap at the end, so
+	// worker threads never observe a partially-populated view.
+	FGitLink_ConnectSnapshot Snap;
+	Snap.PathToRepositoryRoot = _Repository->Get_Path();
+	Snap.BranchName           = _Repository->Get_CurrentBranchName();
 
 	// Resolve the default remote URL (first remote, usually "origin").
 	const TArray<gitlink::FRemote> Remotes = _Repository->Get_Remotes();
 	if (Remotes.Num() > 0)
 	{
-		_RemoteUrl = Remotes[0].FetchUrl;
+		Snap.RemoteUrl = Remotes[0].FetchUrl;
 	}
 
 	// Read user.name / user.email from git config. Empty values mean the user hasn't configured
 	// them; Cmd_CheckIn will surface a helpful error at commit time if that's the case.
 	const gitlink::FSignature Sig = gitlink::op::Get_DefaultSignature(*_Repository);
-	_UserName  = Sig.Name;
-	_UserEmail = Sig.Email;
+	Snap.UserName  = Sig.Name;
+	Snap.UserEmail = Sig.Email;
 
 	// Stand up the subprocess helper (for LFS lock, check-attr, hook fallback) before we probe
 	// anything that needs it. Falls back to "git" on PATH when no override is configured.
-	const FString GitBinary = (Settings != nullptr && !Settings->GitBinaryOverride.IsEmpty())
-		? Settings->GitBinaryOverride
-		: TEXT("git");
-	_Subprocess = MakeShared<FGitLink_Subprocess>(GitBinary, _PathToRepositoryRoot);
+	// A configured override that doesn't point at an existing file is rejected (with a
+	// warning) rather than silently producing a spawn failure on every subprocess call.
+	FString GitBinary = TEXT("git");
+	if (Settings != nullptr && !Settings->GitBinaryOverride.IsEmpty())
+	{
+		if (FPaths::FileExists(Settings->GitBinaryOverride))
+		{
+			GitBinary = Settings->GitBinaryOverride;
+		}
+		else
+		{
+			UE_LOG(LogGitLink, Warning,
+				TEXT("CheckRepositoryStatus: GitBinaryOverride '%s' does not exist — falling back to 'git' on PATH"),
+				*Settings->GitBinaryOverride);
+		}
+	}
+	_Subprocess = MakeShared<FGitLink_Subprocess>(GitBinary, Snap.PathToRepositoryRoot);
 
 	// In-process LFS HTTP client — used by the background poll instead of shelling out to
 	// `git lfs locks --verify --json` per repo. Endpoint URLs are resolved per-repo below
@@ -213,7 +332,6 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 
 	// Discover lockable extensions via .gitattributes. Drives Is_FileLockable and the Lock
 	// state population in Cmd_Connect / Cmd_UpdateStatus.
-	_LockableExtensions.Reset();
 	if (_bLfsAvailable)
 	{
 		const TArray<FString> Wildcards {
@@ -222,28 +340,27 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 			TEXT("*.uexp"),
 			TEXT("*.ubulk"),
 		};
-		_LockableExtensions = _Subprocess->ProbeLockableExtensions(Wildcards);
+		Snap.LockableExtensions = _Subprocess->ProbeLockableExtensions(Wildcards);
 	}
 
 	// Enumerate submodule paths so we can detect files that live in submodules.
 	// These files should not be checked out / checked in from the parent repo.
 	{
 		const TArray<FString> RelativeSubmodules = gitlink::op::Enumerate_SubmodulePaths(*_Repository);
-		_SubmodulePaths.Reset();
-		_SubmodulePaths.Reserve(RelativeSubmodules.Num());
+		Snap.SubmodulePaths.Reserve(RelativeSubmodules.Num());
 		for (const FString& RelPath : RelativeSubmodules)
 		{
-			FString AbsPath = FPaths::Combine(_PathToRepositoryRoot, RelPath);
+			FString AbsPath = FPaths::Combine(Snap.PathToRepositoryRoot, RelPath);
 			FPaths::NormalizeFilename(AbsPath);
 			if (!AbsPath.EndsWith(TEXT("/")))
 			{ AbsPath += TEXT("/"); }
-			_SubmodulePaths.Add(MoveTemp(AbsPath));
+			Snap.SubmodulePaths.Add(MoveTemp(AbsPath));
 		}
 
 		// Push a snapshot into the state cache so new entries are stamped Unlockable at
 		// creation time. This closes the timing window (CLAUDE.md Pitfall #5) where
 		// GetOrCreate_FileState is called before GetState() has had a chance to annotate.
-		_StateCache->Set_SubmodulePaths(_SubmodulePaths);
+		_StateCache->Set_SubmodulePaths(Snap.SubmodulePaths);
 
 		// Enumerate each submodule's tracked-files index. Used by GetState to distinguish
 		// "tracked submodule file the parent's status walk can't see" (default to Unmodified)
@@ -255,10 +372,9 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		// Lower-case the keys for case-insensitive lookup on Windows. The set stores
 		// repo-relative paths (forward-slash form), matching what Enumerate_TrackedFiles
 		// returns from libgit2.
-		_SubmoduleTrackedSets.Reset();
-		_SubmoduleTrackedSets.Reserve(_SubmodulePaths.Num());
+		Snap.SubmoduleTrackedSets.Reserve(Snap.SubmodulePaths.Num());
 		int32 TotalSubmoduleTracked = 0;
-		for (const FString& SubRoot : _SubmodulePaths)
+		for (const FString& SubRoot : Snap.SubmodulePaths)
 		{
 			gitlink::FOpenParams SubParams;
 			SubParams.Path = SubRoot;
@@ -272,7 +388,7 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 			}
 
 			const TArray<FString> SubTracked = gitlink::op::Enumerate_TrackedFiles(*SubRepo);
-			TSet<FString>& SetRef = _SubmoduleTrackedSets.Add(SubRoot);
+			TSet<FString>& SetRef = Snap.SubmoduleTrackedSets.Add(SubRoot);
 			SetRef.Reserve(SubTracked.Num());
 			for (const FString& RelPath : SubTracked)
 			{ SetRef.Add(RelPath.ToLower()); }
@@ -281,7 +397,7 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 
 		UE_LOG(LogGitLink, Log,
 			TEXT("CheckRepositoryStatus: indexed %d tracked file(s) across %d submodule(s) for fast TrackedInSubmodule lookups"),
-			TotalSubmoduleTracked, _SubmoduleTrackedSets.Num());
+			TotalSubmoduleTracked, Snap.SubmoduleTrackedSets.Num());
 
 		// Treat every submodule as a candidate LFS repo. Previously we tried to filter by
 		// scanning each submodule's top-level .gitattributes for `filter=lfs` / `lockable`,
@@ -300,13 +416,13 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		// Endpoint resolution below will silently no-op for non-LFS submodules (no LFS URL
 		// in their git config), so the runtime cost of including them here is bounded to
 		// one resolve attempt at connect time.
-		_LfsSubmodulePaths = _SubmodulePaths;
+		Snap.LfsSubmodulePaths = Snap.SubmodulePaths;
 
 		UE_LOG(LogGitLink, Log,
 			TEXT("CheckRepositoryStatus: treating all %d submodules as LFS candidates (endpoint resolution will filter)"),
-			_LfsSubmodulePaths.Num());
+			Snap.LfsSubmodulePaths.Num());
 
-		for (const FString& SubPath : _SubmodulePaths)
+		for (const FString& SubPath : Snap.SubmodulePaths)
 		{
 			UE_LOG(LogGitLink, Verbose, TEXT("CheckRepositoryStatus: submodule path: '%s'"), *SubPath);
 		}
@@ -319,9 +435,9 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		if (_bLfsAvailable && _LfsHttpClient.IsValid())
 		{
 			int32 ResolvedCount = 0;
-			if (_LfsHttpClient->Resolve_LfsUrlForRepo(_PathToRepositoryRoot))
+			if (_LfsHttpClient->Resolve_LfsUrlForRepo(Snap.PathToRepositoryRoot))
 			{ ++ResolvedCount; }
-			for (const FString& SubRoot : _LfsSubmodulePaths)
+			for (const FString& SubRoot : Snap.LfsSubmodulePaths)
 			{
 				if (_LfsHttpClient->Resolve_LfsUrlForRepo(SubRoot))
 				{ ++ResolvedCount; }
@@ -329,24 +445,32 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 
 			UE_LOG(LogGitLink, Log,
 				TEXT("CheckRepositoryStatus: LFS HTTP client resolved %d/%d LFS endpoint(s)"),
-				ResolvedCount, 1 + _LfsSubmodulePaths.Num());
+				ResolvedCount, 1 + Snap.LfsSubmodulePaths.Num());
 		}
 	}
 
 	UE_LOG(LogGitLink, Log,
 		TEXT("CheckRepositoryStatus: repo='%s' branch='%s' remote='%s' user='%s <%s>' ")
 		TEXT("lfs=%s lockable_exts=%d (0=using hardcoded defaults) submodules=%d"),
-		*_PathToRepositoryRoot, *_BranchName, *_RemoteUrl, *_UserName, *_UserEmail,
+		*Snap.PathToRepositoryRoot, *Snap.BranchName, *Snap.RemoteUrl, *Snap.UserName, *Snap.UserEmail,
 		_bLfsAvailable ? TEXT("yes") : TEXT("no"),
-		_LockableExtensions.Num(),
-		_SubmodulePaths.Num());
+		Snap.LockableExtensions.Num(),
+		Snap.SubmodulePaths.Num());
 
 	// Probe for git hooks so we know whether to route commits through the subprocess.
 	if (Settings != nullptr && Settings->bSubprocessFallbackForHooks)
 	{
-		const FGitLink_HookFlags HookFlags = FGitLink_HookProbe::Probe(_PathToRepositoryRoot);
+		const FGitLink_HookFlags HookFlags = FGitLink_HookProbe::Probe(Snap.PathToRepositoryRoot);
 		_bHasPreCommitOrCommitMsgHook = HookFlags.NeedsSubprocessForCommit();
 	}
+
+	// Publish the completed snapshot in a single guarded swap, then flip the connected flag —
+	// in that order, so any thread that observes "connected" can also observe the metadata.
+	{
+		FScopeLock Lock(&_ConnectSnapshotLock);
+		_ConnectSnapshot = MakeShared<FGitLink_ConnectSnapshot>(MoveTemp(Snap));
+	}
+	_bGitRepositoryFound = true;
 
 	// Create or reconfigure the background poll. Driven by the provider's Tick() every frame
 	// rather than FTSTicker, which avoids ticker handle issues during Init(force=true) re-init.
@@ -477,15 +601,19 @@ auto FGitLink_Provider::OnPackageSaved(const FString& InFilename) -> void
 	if (!_bGitRepositoryFound)
 	{ return; }
 
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	if (!Snap.IsValid())
+	{ return; }
+
 	FString Normalized = FPaths::ConvertRelativePathToFull(InFilename);
 	FPaths::NormalizeFilename(Normalized);
 
 	// Ignore saves outside the repository root.
-	if (!Normalized.StartsWith(_PathToRepositoryRoot))
+	if (!Normalized.StartsWith(Snap->PathToRepositoryRoot))
 	{
 		UE_LOG(LogGitLink, Verbose,
 			TEXT("OnPackageSaved: ignoring '%s' (outside repo root '%s')"),
-			*Normalized, *_PathToRepositoryRoot);
+			*Normalized, *Snap->PathToRepositoryRoot);
 		return;
 	}
 
@@ -501,9 +629,9 @@ auto FGitLink_Provider::OnPackageSaved(const FString& InFilename) -> void
 		if (State->_State.Tree == EGitLink_TreeState::Staged)
 		{
 			FString RelPath = Normalized;
-			if (RelPath.StartsWith(_PathToRepositoryRoot, ESearchCase::IgnoreCase))
+			if (RelPath.StartsWith(Snap->PathToRepositoryRoot, ESearchCase::IgnoreCase))
 			{
-				RelPath.RightChopInline(_PathToRepositoryRoot.Len(), EAllowShrinking::No);
+				RelPath.RightChopInline(Snap->PathToRepositoryRoot.Len(), EAllowShrinking::No);
 				RelPath.RemoveFromStart(TEXT("/"));
 			}
 			_Repository->Stage({ RelPath });
@@ -600,22 +728,30 @@ auto FGitLink_Provider::Request_LockRefreshForFile(const FString& InAbsolutePath
 	if (!HttpClient.IsValid() || !gitlink::lfs_http::Is_Enabled())
 	{ return; }
 
+	// Grab the connect snapshot once for all path queries below — this function is called from
+	// worker threads (Cmd_UpdateStatus's explicit-file branch) as well as editor delegates, and
+	// must not read provider containers the game thread may be rebuilding.
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	if (!Snap.IsValid())
+	{ return; }
+
 	// Normalize once — used for the cache lookup, debounce key, and the HTTP repo-relative
 	// derivation. The state cache normalizes its own keys, but the debounce map and the HTTP
 	// path want consistent input.
 	FString Normalized = FPaths::ConvertRelativePathToFull(InAbsolutePath);
 	FPaths::NormalizeFilename(Normalized);
 
-	if (!Normalized.StartsWith(_PathToRepositoryRoot))
+	if (!Normalized.StartsWith(Snap->PathToRepositoryRoot))
 	{ return; }
 
-	if (!Is_FileLockable(Normalized))
+	if (!Snapshot_IsFileLockable(Snap.Get(), Normalized))
 	{ return; }
 
 	// Submodule files: only probe tracked entries. Untracked-in-submodule = the file isn't in
 	// HEAD yet, so a server-side lock is meaningless and the f345260 "auto-lock-on-create"
 	// fix would be regressed if we let untracked files through to a lock probe → checkout.
-	if (Is_InSubmodule(Normalized) && !Is_TrackedInSubmodule(Normalized))
+	const FString SubmoduleRoot = Snapshot_GetSubmoduleRoot(Snap.Get(), Normalized);
+	if (!SubmoduleRoot.IsEmpty() && !Snapshot_IsTrackedInSubmodule(Snap.Get(), Normalized))
 	{ return; }
 
 	// Per-path debounce. Hot path — keep the critical section short.
@@ -626,13 +762,25 @@ auto FGitLink_Provider::Request_LockRefreshForFile(const FString& InAbsolutePath
 		if (LastSec != nullptr && (NowSec - *LastSec) < kSingleFileRefreshDebounceSec)
 		{ return; }
 		_LastLockRefreshSec.Add(Normalized, NowSec);
+
+		// Opportunistic prune so a long editor session touching thousands of unique assets
+		// doesn't grow the map without bound (same pattern as _RecentLocalLockOps). Entries
+		// older than the debounce window are dead weight — nothing reads them again.
+		if (_LastLockRefreshSec.Num() > 256)
+		{
+			for (auto It = _LastLockRefreshSec.CreateIterator(); It; ++It)
+			{
+				if (NowSec - It->Value > kSingleFileRefreshDebounceSec)
+				{ It.RemoveCurrent(); }
+			}
+		}
 	}
 
 	// Determine which repo the file belongs to (parent or a specific submodule). HTTP path
 	// is keyed by repo root; the repo's LFS endpoint must already be cached.
-	const FString RepoRoot = Is_InSubmodule(Normalized)
-		? Get_SubmoduleRoot(Normalized)
-		: _PathToRepositoryRoot;
+	const FString RepoRoot = !SubmoduleRoot.IsEmpty()
+		? SubmoduleRoot
+		: Snap->PathToRepositoryRoot;
 	if (RepoRoot.IsEmpty() || !HttpClient->Has_LfsUrl(RepoRoot))
 	{ return; }
 
@@ -643,12 +791,13 @@ auto FGitLink_Provider::Request_LockRefreshForFile(const FString& InAbsolutePath
 	// blocked. Marshal the result back via AsyncTask(GameThread) so the cache mutation is
 	// race-free with other readers.
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
-		[this, Normalized, RepoRoot, HttpClient]()
+		[this, Alive = _ProviderAlive, Normalized, RepoRoot, HttpClient]()
 		{
 			// The task may have been queued just before shutdown began. Touching the HTTP module
 			// during teardown (when it has unloaded) aborts on FHttpModule::Get()'s game-thread
-			// assert. Bail if exit is in progress.
-			if (IsEngineExitRequested())
+			// assert. Bail if exit is in progress. (The Alive token is captured here, NOT read
+			// through `this`, so the read itself is safe even if the provider is already gone.)
+			if (IsEngineExitRequested() || !Alive->load(std::memory_order_acquire))
 			{ return; }
 
 			const FGitLink_LfsHttpClient::FSingleFileLockResult Result =
@@ -657,8 +806,15 @@ auto FGitLink_Provider::Request_LockRefreshForFile(const FString& InAbsolutePath
 			{ return; }
 
 			AsyncTask(ENamedThreads::GameThread,
-				[this, Normalized, Result]()
+				[this, Alive, Normalized, Result]()
 				{
+					// The provider is destroyed on the game thread (module shutdown), so checking
+					// the by-value-captured token here and the destruction can't interleave. If
+					// the token is dead, `this` is dangling — bail before touching any member.
+					// Same mechanics as the dispatcher's _Alive token (v0.3.10).
+					if (!Alive->load(std::memory_order_acquire))
+					{ return; }
+
 					if (!_StateCache.IsValid())
 					{ return; }
 
@@ -728,15 +884,17 @@ auto FGitLink_Provider::GetName() const -> const FName&
 
 auto FGitLink_Provider::GetStatusText() const -> FText
 {
-	FFormatNamedArguments Args;
-	Args.Add(TEXT("RepositoryRoot"), FText::FromString(_PathToRepositoryRoot));
-	Args.Add(TEXT("Branch"),         FText::FromString(_BranchName));
-	Args.Add(TEXT("Remote"),         FText::FromString(_RemoteUrl));
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
 
-	if (!_bGitRepositoryFound)
+	if (!_bGitRepositoryFound || !Snap.IsValid())
 	{
 		return LOCTEXT("StatusNotConnected", "GitLink: no repository");
 	}
+
+	FFormatNamedArguments Args;
+	Args.Add(TEXT("RepositoryRoot"), FText::FromString(Snap->PathToRepositoryRoot));
+	Args.Add(TEXT("Branch"),         FText::FromString(Snap->BranchName));
+	Args.Add(TEXT("Remote"),         FText::FromString(Snap->RemoteUrl));
 
 	return FText::Format(
 		LOCTEXT("StatusConnected", "GitLink repo: {RepositoryRoot}\nBranch: {Branch}\nRemote: {Remote}"),
@@ -761,6 +919,14 @@ auto FGitLink_Provider::GetState(
 	TArray<FSourceControlStateRef>& OutState,
 	EStateCacheUsage::Type /*InStateCacheUsage*/) -> ECommandResult::Type
 {
+	// Note on EStateCacheUsage::ForceUpdate: deliberately ignored. The contract says "refresh
+	// from the backend before answering", but a synchronous refresh here would block the game
+	// thread on libgit2/LFS work (the v0.3.1 hang class). Freshness is instead provided by the
+	// background sweep, the single-file lock probes, and the immediate poll after mutating
+	// commands; the editor re-queries on OnSourceControlStateChanged.
+
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+
 	OutState.Reserve(InFiles.Num());
 	for (const FString& File : InFiles)
 	{
@@ -772,17 +938,20 @@ auto FGitLink_Provider::GetState(
 
 		FGitLink_FileStateRef State = _StateCache->GetOrCreate_FileState(Normalized);
 
-		// Stamp the bInSubmodule flag so command code can partition the batch by repo.
-		// Predicates are otherwise submodule-agnostic — submodule files are lockable,
-		// checkoutable, etc. on the same basis as outer-repo files. Real lock state comes
-		// from the per-submodule LFS poll in Cmd_UpdateStatus.
-		if (Is_InSubmodule(Normalized))
+		// Default-stamp submodule entries the cache hasn't seen real status for yet. Done
+		// COPY-ON-WRITE (clone → stamp → Set_FileState) rather than mutating the shared
+		// entry in place: worker-thread command bodies read the same FGitLink_FileStateRef
+		// concurrently, and in-place writes from this (game-thread) query were a data race.
+		// The cache's GetOrCreate_FileState already stamps bInSubmodule at creation, so the
+		// clone only happens for entries created before connect published submodule paths,
+		// or for the first query of a tracked-but-not-yet-scanned submodule file.
+		if (Snap.IsValid() && Snapshot_IsInSubmodule(Snap.Get(), Normalized))
 		{
-			State->_State.bInSubmodule = true;
+			const bool bNeedsSubmoduleFlag = !State->_State.bInSubmodule;
 
 			// If we don't yet have a real Tree state for this file, decide between two
 			// optimistic defaults based on the per-submodule tracked-files index built at
-			// connect time (Is_TrackedInSubmodule):
+			// connect time:
 			//
 			//   - Tracked in the submodule's index → default Unmodified. The parent's
 			//     libgit2 status walk doesn't recurse into submodules, so we'd otherwise
@@ -796,15 +965,26 @@ auto FGitLink_Provider::GetState(
 			//     file that isn't even in git yet. Cmd_MarkForAdd is the correct flow
 			//     for these files; once they're staged the next UpdateStatus pass
 			//     stamps Tree=Staged via the per-submodule status walk.
-			if (State->_State.Tree == EGitLink_TreeState::NotInRepo ||
-				State->_State.Tree == EGitLink_TreeState::Unset)
+			const bool bNeedsTreeDefault =
+				(State->_State.Tree == EGitLink_TreeState::NotInRepo ||
+				 State->_State.Tree == EGitLink_TreeState::Unset)
+				&& Snapshot_IsTrackedInSubmodule(Snap.Get(), Normalized);
+
+			if (bNeedsSubmoduleFlag || bNeedsTreeDefault)
 			{
-				if (Is_TrackedInSubmodule(Normalized))
-				{
-					State->_State.Tree = EGitLink_TreeState::Unmodified;
-				}
-				// else: leave Tree=NotInRepo. CanCheckout's bUntracked guard fires on
-				// NotInRepo and blocks the misleading "check out?" prompt for new files.
+				FGitLink_FileStateRef NewState =
+					MakeShared<FGitLink_FileState, ESPMode::ThreadSafe>(Normalized);
+				NewState->_State      = State->_State;
+				NewState->_Changelist = State->_Changelist;
+				NewState->_History    = State->_History;
+				NewState->_TimeStamp  = State->_TimeStamp;
+
+				NewState->_State.bInSubmodule = true;
+				if (bNeedsTreeDefault)
+				{ NewState->_State.Tree = EGitLink_TreeState::Unmodified; }
+
+				_StateCache->Set_FileState(Normalized, NewState);
+				State = NewState;
 			}
 		}
 
@@ -941,7 +1121,15 @@ auto FGitLink_Provider::GetNumLocalChanges() const -> TOptional<int>
 	if (!_bGitRepositoryFound)
 	{ return {}; }
 
-	return _StateCache->Get_NumFiles();
+	// Count actual local changes, not cache entries — the cache holds one entry per file the
+	// editor has EVER queried (GetState creates entries on demand), so Get_NumFiles() would
+	// report thousands of "local changes" on a clean repo.
+	const TArray<FGitLink_FileStateRef> Changed = _StateCache->Enumerate_FileStates(
+		[](const FGitLink_FileStateRef& InState) -> bool
+		{
+			return InState->IsModified() || InState->IsAdded() || InState->IsDeleted();
+		});
+	return Changed.Num();
 }
 #endif
 
@@ -959,11 +1147,13 @@ auto FGitLink_Provider::CanExecuteOperation(const FSourceControlOperationRef& /*
 
 auto FGitLink_Provider::GetStatus() const -> TMap<EStatus, FString>
 {
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+
 	TMap<EStatus, FString> Out;
-	Out.Add(EStatus::Repository, _PathToRepositoryRoot);
-	Out.Add(EStatus::User,       _UserName);
-	Out.Add(EStatus::Branch,     _BranchName);
-	Out.Add(EStatus::Remote,     _RemoteUrl);
+	Out.Add(EStatus::Repository, Snap.IsValid() ? Snap->PathToRepositoryRoot : FString());
+	Out.Add(EStatus::User,       Snap.IsValid() ? Snap->UserName             : FString());
+	Out.Add(EStatus::Branch,     Snap.IsValid() ? Snap->BranchName           : FString());
+	Out.Add(EStatus::Remote,     Snap.IsValid() ? Snap->RemoteUrl            : FString());
 	return Out;
 }
 #endif
@@ -1038,9 +1228,9 @@ auto FGitLink_Provider::Get_StateCache() -> FGitLink_StateCache&
 	return *_StateCache;
 }
 
-auto FGitLink_Provider::Get_Repository() const -> gitlink::FRepository*
+auto FGitLink_Provider::Get_Repository() const -> TSharedPtr<gitlink::FRepository>
 {
-	return _Repository.Get();
+	return _Repository;
 }
 
 auto FGitLink_Provider::Get_Subprocess() const -> TSharedPtr<FGitLink_Subprocess>
@@ -1053,35 +1243,65 @@ auto FGitLink_Provider::Get_LfsHttpClient() const -> TSharedPtr<FGitLink_LfsHttp
 	return _LfsHttpClient;
 }
 
+auto FGitLink_Provider::Get_ConnectSnapshot() const -> TSharedPtr<const FGitLink_ConnectSnapshot>
+{
+	FScopeLock Lock(&_ConnectSnapshotLock);
+	return _ConnectSnapshot;
+}
+
+auto FGitLink_Provider::Get_LastConnectError() const -> FText
+{
+	FScopeLock Lock(&_LastErrorLock);
+	return _LastError;
+}
+
+auto FGitLink_Provider::Get_SubmodulePaths() const -> TArray<FString>
+{
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	return Snap.IsValid() ? Snap->SubmodulePaths : TArray<FString>();
+}
+
+auto FGitLink_Provider::Get_LfsSubmodulePaths() const -> TArray<FString>
+{
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	return Snap.IsValid() ? Snap->LfsSubmodulePaths : TArray<FString>();
+}
+
+auto FGitLink_Provider::Get_PathToRepositoryRoot() const -> FString
+{
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	return Snap.IsValid() ? Snap->PathToRepositoryRoot : FString();
+}
+
+auto FGitLink_Provider::Get_UserName() const -> FString
+{
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	return Snap.IsValid() ? Snap->UserName : FString();
+}
+
+auto FGitLink_Provider::Get_UserEmail() const -> FString
+{
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	return Snap.IsValid() ? Snap->UserEmail : FString();
+}
+
+auto FGitLink_Provider::Get_BranchName() const -> FString
+{
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	return Snap.IsValid() ? Snap->BranchName : FString();
+}
+
+auto FGitLink_Provider::Get_RemoteUrl() const -> FString
+{
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	return Snap.IsValid() ? Snap->RemoteUrl : FString();
+}
+
 auto FGitLink_Provider::Is_FileLockable(const FString& InAbsolutePath) const -> bool
 {
-	// If check-attr found explicit 'lockable' extensions, use those.
-	if (!_LockableExtensions.IsEmpty())
-	{
-		for (const FString& Ext : _LockableExtensions)
-		{
-			if (InAbsolutePath.EndsWith(Ext, ESearchCase::IgnoreCase))
-			{ return true; }
-		}
-		return false;
-	}
-
-	// Fallback: most UE repos use LFS for binary assets via 'filter=lfs' but omit the
-	// 'lockable' keyword from .gitattributes. We hardcode the common UE binary extensions
-	// so the checkout workflow works out of the box for typical Unreal projects.
-	static const TCHAR* DefaultLockableExts[] = {
-		TEXT(".uasset"),
-		TEXT(".umap"),
-		TEXT(".uexp"),
-		TEXT(".ubulk"),
-	};
-
-	for (const TCHAR* Ext : DefaultLockableExts)
-	{
-		if (InAbsolutePath.EndsWith(Ext, ESearchCase::IgnoreCase))
-		{ return true; }
-	}
-	return false;
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	// Pure extension matching — no path normalization needed.
+	return Snapshot_IsFileLockable(Snap.Get(), InAbsolutePath);
 }
 
 auto FGitLink_Provider::Is_InSubmodule(const FString& InAbsolutePath) const -> bool
@@ -1089,12 +1309,8 @@ auto FGitLink_Provider::Is_InSubmodule(const FString& InAbsolutePath) const -> b
 	FString Normalized = FPaths::ConvertRelativePathToFull(InAbsolutePath);
 	FPaths::NormalizeFilename(Normalized);
 
-	for (const FString& SubPath : _SubmodulePaths)
-	{
-		if (Normalized.StartsWith(SubPath, ESearchCase::IgnoreCase))
-		{ return true; }
-	}
-	return false;
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	return Snapshot_IsInSubmodule(Snap.Get(), Normalized);
 }
 
 auto FGitLink_Provider::Get_SubmoduleRoot(const FString& InAbsolutePath) const -> FString
@@ -1102,40 +1318,17 @@ auto FGitLink_Provider::Get_SubmoduleRoot(const FString& InAbsolutePath) const -
 	FString Normalized = FPaths::ConvertRelativePathToFull(InAbsolutePath);
 	FPaths::NormalizeFilename(Normalized);
 
-	for (const FString& SubPath : _SubmodulePaths)
-	{
-		if (Normalized.StartsWith(SubPath, ESearchCase::IgnoreCase))
-		{ return SubPath; }
-	}
-	return FString();
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	return Snapshot_GetSubmoduleRoot(Snap.Get(), Normalized);
 }
 
 auto FGitLink_Provider::Is_TrackedInSubmodule(const FString& InAbsolutePath) const -> bool
 {
-	if (_SubmoduleTrackedSets.IsEmpty())
-	{ return false; }
-
 	FString Normalized = FPaths::ConvertRelativePathToFull(InAbsolutePath);
 	FPaths::NormalizeFilename(Normalized);
 
-	for (const TPair<FString, TSet<FString>>& Pair : _SubmoduleTrackedSets)
-	{
-		const FString& SubRoot = Pair.Key;  // has trailing forward slash
-		if (!Normalized.StartsWith(SubRoot, ESearchCase::IgnoreCase))
-		{ continue; }
-
-		FString Relative = Normalized.RightChop(SubRoot.Len());
-		Relative.ReplaceInline(TEXT("\\"), TEXT("/"));
-		Relative.RemoveFromStart(TEXT("/"));
-		Relative = Relative.ToLower();
-		if (Pair.Value.Contains(Relative))
-		{ return true; }
-
-		// File is inside this submodule but not tracked. Don't fall through to other
-		// submodules — submodule roots don't overlap.
-		return false;
-	}
-	return false;
+	const TSharedPtr<const FGitLink_ConnectSnapshot> Snap = Get_ConnectSnapshot();
+	return Snapshot_IsTrackedInSubmodule(Snap.Get(), Normalized);
 }
 
 auto FGitLink_Provider::Open_SubmoduleRepositoryFor(const FString& InAbsolutePath) const

@@ -26,6 +26,7 @@ namespace gitlink::libgit2
 	struct FGitRevwalkDeleter     { void operator()(git_revwalk*     P) const { if (P) { git_revwalk_free(P);     } } };
 	struct FGitSignatureDeleter   { void operator()(git_signature*   P) const { if (P) { git_signature_free(P);   } } };
 	struct FGitBranchIteratorDeleter { void operator()(git_branch_iterator* P) const { if (P) { git_branch_iterator_free(P); } } };
+	struct FGitAnnotatedCommitDeleter { void operator()(git_annotated_commit* P) const { if (P) { git_annotated_commit_free(P); } } };
 
 	using FRepoPtr       = TUniquePtr<git_repository,      FGitRepositoryDeleter>;
 	using FIndexPtr      = TUniquePtr<git_index,           FGitIndexDeleter>;
@@ -37,6 +38,7 @@ namespace gitlink::libgit2
 	using FRevwalkPtr    = TUniquePtr<git_revwalk,         FGitRevwalkDeleter>;
 	using FSignaturePtr  = TUniquePtr<git_signature,       FGitSignatureDeleter>;
 	using FBranchIterPtr = TUniquePtr<git_branch_iterator, FGitBranchIteratorDeleter>;
+	using FAnnotatedCommitPtr = TUniquePtr<git_annotated_commit, FGitAnnotatedCommitDeleter>;
 }
 
 #endif  // WITH_LIBGIT2

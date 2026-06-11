@@ -12,9 +12,13 @@
 // --------------------------------------------------------------------------------------------------------------------
 // op::WalkLog — revwalk from a start point (HEAD by default) collecting FCommit value structs.
 //
-// Path filtering (FLogQuery::PathFilter) is NOT yet implemented — libgit2's revwalk doesn't do
-// it natively; you'd have to diff each commit against its parents. A log warning is emitted when
-// it's set so callers know to wait for the follow-up. For now PathFilter is silently ignored.
+// Path filtering (FLogQuery::PathFilter) is a blob-OID TREESAME test: for each walked commit we
+// look up the blob OID at PathFilter in the commit's tree and in each parent's tree, and keep the
+// commit only when it is TREESAME to NO parent (the blob differs from, or exists on only one side
+// of, every parent). Cheap — tree-entry lookups only, no diffs are materialized.
+//
+// Limitation: the comparison is anchored to the FIXED path, so history does not follow renames —
+// a rename shows up as the file appearing at the new path (and disappearing at the old one).
 // --------------------------------------------------------------------------------------------------------------------
 
 namespace gitlink::op
@@ -89,9 +93,10 @@ namespace gitlink::op
 
 		// Path filter setup: we resolve the path once here (converting to UTF-8) and then
 		// in the walk loop we compare the blob OID at PathFilter in each commit's tree against
-		// the blob OID at PathFilter in the first parent's tree. If they differ (or one is
-		// missing), the commit touched the file and we include it in the result. This is cheap
-		// because tree lookups are fast and we never materialize diffs.
+		// the blob OID at PathFilter in each parent's tree. If the commit is TREESAME to no
+		// parent (the blob differs, or exists on only one side), the commit touched the file and
+		// we include it in the result. This is cheap because tree lookups are fast and we never
+		// materialize diffs.
 		const bool bFilterByPath = !InQuery.PathFilter.IsEmpty();
 		FTCHARToUTF8 PathFilterUtf8(bFilterByPath ? *InQuery.PathFilter : TEXT(""));
 

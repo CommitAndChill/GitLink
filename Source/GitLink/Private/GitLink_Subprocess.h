@@ -54,6 +54,17 @@ public:
 	auto RunLfs(const TArray<FString>& InArgs, const FString& InCwdOverride = FString())
 		-> FGitLink_SubprocessResult;
 
+	// Like Run(), but with a hard wall-clock deadline: if git is still running when the
+	// timeout expires, the process tree is terminated and the result reports failure.
+	// Stdout is captured incrementally; stderr is inherited (NOT captured) — acceptable for
+	// callers that mainly need success/failure.
+	//
+	// Use this for network-facing commands (push, pull) where a wedged credential helper, an
+	// interactive prompt, or a dead remote would otherwise block the calling thread forever —
+	// Run() is built on ExecProcess, which has no timeout at all.
+	auto Run_Bounded(const TArray<FString>& InArgs, const FString& InCwdOverride,
+		double InTimeoutSec) -> FGitLink_SubprocessResult;
+
 	// Probe: is git-lfs installed and usable?
 	auto IsLfsAvailable() -> bool;
 

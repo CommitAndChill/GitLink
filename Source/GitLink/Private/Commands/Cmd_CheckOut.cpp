@@ -70,49 +70,59 @@ namespace gitlink::cmd
 		FCommandResult Result = FCommandResult::Ok();
 		Result.UpdatedStates.Reserve(LockableAbsolute.Num());
 
+		// Lock PER FILE, not per batch. `git lfs lock` with N paths reports failure for the
+		// whole invocation, and the old batch-level handling had two real bugs in mixed
+		// batches: (a) one "Lock exists" (ours) plus one genuine rejection stamped the WHOLE
+		// batch Locked + writable (and Note_LocalLockOp then shielded the wrong state from
+		// sweep correction for 30s); (b) a failing later batch returned Fail(), discarding
+		// the Locked states of earlier batches whose server-side locks were already acquired
+		// — invisible held locks. Checkout batches are typically small (user-selected), so
+		// one subprocess per file is acceptable.
 		int32 TotalLocked = 0;
+		TArray<FString> FailedFiles;
+		TArray<FString> FailureDetails;
+
 		for (const FRepoBatch& Batch : Batches)
 		{
-			if (Batch.RelativeFiles.IsEmpty())
-			{ continue; }
-
-			TArray<FString> LockArgs;
-			LockArgs.Reserve(Batch.RelativeFiles.Num() + 1);
-			LockArgs.Add(TEXT("lock"));
-			LockArgs.Append(Batch.RelativeFiles);
-
 			const FString CwdOverride = Batch.bIsSubmodule ? Batch.RepoRoot : FString();
-			const FGitLink_SubprocessResult LockResult = InCtx.Subprocess->RunLfs(LockArgs, CwdOverride);
 
-			if (!LockResult.IsSuccess())
-			{
-				// "Lock exists" means WE already hold the lock — that's the desired end state,
-				// so treat it as success. The editor re-runs checkout after a Cmd_Connect
-				// reconnect, and we don't want to fail just because we're already locked.
-				const FString ErrStr = LockResult.Get_CombinedError();
-				const bool bAlreadyLockedByUs = ErrStr.Contains(TEXT("Lock exists"));
-
-				if (!bAlreadyLockedByUs)
-				{
-					const FText Err = FText::Format(
-						LOCTEXT("LockFailed", "GitLink: git lfs lock failed (cwd='{0}'): {1}"),
-						FText::FromString(Batch.RepoRoot),
-						FText::FromString(ErrStr));
-
-					UE_LOG(LogGitLink, Warning, TEXT("%s"), *Err.ToString());
-					return FCommandResult::Fail(Err);
-				}
-
-				UE_LOG(LogGitLink, Log,
-					TEXT("Cmd_CheckOut: file(s) in '%s' already locked by us, treating as success"),
-					*Batch.RepoRoot);
-			}
-
-			// Clear read-only and emit predictive Locked state for each file in the bucket.
 			for (int32 Idx = 0; Idx < Batch.AbsoluteFiles.Num(); ++Idx)
 			{
 				const FString& Absolute = Batch.AbsoluteFiles[Idx];
+				const FString& Relative = Batch.RelativeFiles[Idx];
 
+				// `--` terminates option parsing so a path starting with '-' can't be read as
+				// a git-lfs flag.
+				const FGitLink_SubprocessResult LockResult =
+					InCtx.Subprocess->RunLfs({ TEXT("lock"), TEXT("--"), Relative }, CwdOverride);
+
+				if (!LockResult.IsSuccess())
+				{
+					// "Lock exists" is ambiguous: it fires both when WE already hold the lock
+					// (idempotent re-lock — desired end state, e.g. the editor re-runs checkout
+					// after a reconnect) and when SOMEONE ELSE does. Disambiguate via the cache:
+					// only treat it as success when we have no record of another user's lock.
+					const FString ErrStr = LockResult.Get_CombinedError();
+					const bool bLockExists = ErrStr.Contains(TEXT("Lock exists"));
+					const FGitLink_FileStateRef Existing = InCtx.StateCache.Find_FileState(Absolute);
+					const bool bCacheSaysOther =
+						Existing->_State.Lock == EGitLink_LockState::LockedOther;
+
+					if (!bLockExists || bCacheSaysOther)
+					{
+						UE_LOG(LogGitLink, Warning,
+							TEXT("Cmd_CheckOut: git lfs lock '%s' failed (cwd='%s'): %s"),
+							*Relative, *Batch.RepoRoot, *ErrStr);
+						FailedFiles.Add(Absolute);
+						FailureDetails.Add(FString::Printf(TEXT("'%s': %s"), *Relative, *ErrStr));
+						continue;
+					}
+
+					UE_LOG(LogGitLink, Log,
+						TEXT("Cmd_CheckOut: '%s' already locked by us, treating as success"), *Relative);
+				}
+
+				// Clear read-only and emit predictive Locked state for this file.
 				if (FPaths::FileExists(Absolute))
 				{
 					FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*Absolute, false);
@@ -130,14 +140,29 @@ namespace gitlink::cmd
 				// Cmd_UpdateStatus right after we return, and a stale /locks/verify response
 				// would otherwise demote our just-locked file back to NotLocked.
 				InCtx.Provider.Note_LocalLockOp(Absolute);
-			}
 
-			TotalLocked += Batch.RelativeFiles.Num();
+				++TotalLocked;
+			}
 		}
 
 		UE_LOG(LogGitLink, Log,
-			TEXT("Cmd_CheckOut: locked %d LFS file(s) across %d repo(s) as '%s'"),
-			TotalLocked, Batches.Num(), *InCtx.Provider.Get_UserName());
+			TEXT("Cmd_CheckOut: locked %d of %d LFS file(s) across %d repo(s) as '%s'"),
+			TotalLocked, LockableAbsolute.Num(), Batches.Num(), *InCtx.Provider.Get_UserName());
+
+		if (!FailedFiles.IsEmpty())
+		{
+			// Partial failure: the states for successfully-locked files are still applied (the
+			// dispatcher merges UpdatedStates regardless of bOk), so the cache matches the
+			// server even when the operation as a whole reports failure.
+			Result.bOk = false;
+			Result.ErrorMessages.Add(FText::Format(
+				LOCTEXT("LockFailedPartial",
+					"GitLink: failed to lock {0} of {1} file(s): {2}"),
+				FText::AsNumber(FailedFiles.Num()),
+				FText::AsNumber(LockableAbsolute.Num()),
+				FText::FromString(JoinTruncated(FailureDetails))));
+			return Result;
+		}
 
 		Result.InfoMessages.Add(FText::Format(
 			LOCTEXT("LockOk", "Locked {0} file(s) via git-lfs."),

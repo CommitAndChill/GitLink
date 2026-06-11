@@ -35,10 +35,6 @@ auto FGitLink_BackgroundPoll::Tick(float InDeltaTime) -> void
 	if (_IntervalSeconds <= 0.f)
 	{ return; }
 
-	// Paused by an in-flight operation (commit, revert, etc.)
-	if (_PauseCount.Load() > 0)
-	{ return; }
-
 	_TimeSinceLastPoll += InDeltaTime;
 	if (_TimeSinceLastPoll < _IntervalSeconds)
 	{ return; }

@@ -37,19 +37,22 @@ namespace gitlink::cmd
 	{
 		FGitLink_Provider&    Provider;
 		FGitLink_StateCache&  StateCache;
-		gitlink::FRepository* Repository;  // may be nullptr if the repo isn't open yet (e.g. during Connect)
 
-		// Snapshot of the provider's subprocess handle. Held by-value so a concurrent
-		// Init(force=true) tear-down can't free the underlying object while a command is mid-
-		// execution (in particular, while a ParallelFor body is fanned out across workers).
-		// Use `Subprocess->...` (operator-> on TSharedPtr) or `!Subprocess.IsValid()` to test;
-		// `Subprocess == nullptr` also works because TSharedPtr has a nullptr comparison.
-		// May be unset if no git binary is configured or the provider was Close()'d before this
-		// context was built. See v0.3.6 entry in CLAUDE.md Version log.
-		TSharedPtr<FGitLink_Subprocess> Subprocess;
+		// Snapshots of the provider's repository / subprocess handles. Held by-value
+		// (refcounted) so a concurrent Init(force=true) tear-down can't free the underlying
+		// object while a command is mid-execution — neither during a ParallelFor fan-out
+		// (v0.3.6) nor for the whole lifetime of an async command body that outlives a
+		// reconnect's _Repository reset (the v0.3.10 follow-up). The context is built ON THE
+		// GAME THREAD in Dispatch (where the provider reassigns these slots), then moved into
+		// the async body — so the snapshot itself can never race the reassignment.
+		// Use `Repository->...` / `!Repository.IsValid()`; `== nullptr` also works because
+		// TSharedPtr has a nullptr comparison. Repository may be unset if the repo isn't open
+		// yet (e.g. during Connect); Subprocess may be unset if no git binary is configured.
+		TSharedPtr<gitlink::FRepository> Repository;
+		TSharedPtr<FGitLink_Subprocess>  Subprocess;
 
 		// Absolute path to the repository working tree root — copied from the provider so command
-		// handlers don't need to take the provider lock to read it.
+		// handlers don't need to touch provider state to read it.
 		FString RepoRootAbsolute;
 
 		// Destination changelist for MoveToChangelist operations. Nullptr for all other ops.
@@ -133,14 +136,20 @@ public:
 	auto Shutdown_AndDrain() -> void;
 
 private:
-	// Runs the handler synchronously and merges the result into the state cache + fires the
-	// completion delegate. Safe to call from any thread — state merge is marshalled to game thread.
+	// Builds the command context by snapshotting provider state. MUST be called on the game
+	// thread — that's where the provider reassigns the Repository/Subprocess TSharedPtr slots,
+	// so snapshotting anywhere else would race Init(force=true).
+	auto Build_Context(FSourceControlChangelistPtr InChangelist) -> gitlink::cmd::FCommandContext;
+
+	// Runs the handler against the pre-built context and merges the result into the state
+	// cache + fires the completion delegate. Safe to call from any thread — state merge is
+	// marshalled to the game thread.
 	auto Execute_AndComplete(
+		gitlink::cmd::FCommandContext     InContext,
 		gitlink::cmd::FCommandFn          InHandler,
 		FSourceControlOperationRef        InOperation,
 		TArray<FString>                   InFiles,
-		FSourceControlOperationComplete   InCompleteDelegate,
-		FSourceControlChangelistPtr       InChangelist) -> ECommandResult::Type;
+		FSourceControlOperationComplete   InCompleteDelegate) -> ECommandResult::Type;
 
 	FGitLink_Provider& _Owner;
 	TMap<FName, gitlink::cmd::FCommandFn> _Handlers;
@@ -156,5 +165,10 @@ private:
 	// a body holds a raw reference to the provider. Incremented on the game thread before the task
 	// is launched (so a body is accounted for before `Shutdown_AndDrain()` can observe the count),
 	// decremented when the body returns. Drained by `Shutdown_AndDrain()`.
-	std::atomic<int32> _InFlightBodies{0};
+	//
+	// Held as a TSharedRef and captured by value in the body lambda so the decrement on the way
+	// out never writes through `this` — if the 15s drain backstop ever fires and the dispatcher
+	// is destroyed with a body still running, the body's bookkeeping touches only the shared
+	// atomic, not freed dispatcher memory.
+	TSharedRef<std::atomic<int32>> _InFlightBodies = MakeShared<std::atomic<int32>>(0);
 };

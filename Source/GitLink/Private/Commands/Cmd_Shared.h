@@ -109,6 +109,11 @@ namespace gitlink::cmd
 	// to git / git-lfs commands (both of which expect forward slashes regardless of platform).
 	// Uses case-insensitive prefix stripping because Windows paths can differ in casing between
 	// the repo root discovered by libgit2 and the paths the editor hands us.
+	//
+	// Returns EMPTY when the path is not under the given root (file outside the repo, subst-
+	// drive mismatch, etc.) — callers must skip such files. The old behavior of returning the
+	// absolute path unchanged fed garbage "relative" paths into git pathspecs and `git lfs
+	// lock`/`unlock` argument lists, which silently matched nothing.
 	inline auto ToRepoRelativePath(const FString& InRepoRootAbsolute, const FString& InAbsolute) -> FString
 	{
 		FString NormAbs = FPaths::ConvertRelativePathToFull(InAbsolute);
@@ -122,14 +127,31 @@ namespace gitlink::cmd
 			NormRoot += TEXT("/");
 		}
 
-		FString Rel = NormAbs;
-		if (!NormRoot.IsEmpty() && Rel.StartsWith(NormRoot, ESearchCase::IgnoreCase))
+		if (NormRoot.IsEmpty() || !NormAbs.StartsWith(NormRoot, ESearchCase::IgnoreCase))
 		{
-			Rel.RightChopInline(NormRoot.Len(), EAllowShrinking::No);
+			return FString();
 		}
+
+		FString Rel = NormAbs;
+		Rel.RightChopInline(NormRoot.Len(), EAllowShrinking::No);
 		Rel.ReplaceInline(TEXT("\\"), TEXT("/"));
 		Rel.RemoveFromStart(TEXT("/"));
 		return Rel;
+	}
+
+	// Join error strings with newlines, truncating the result so a pathological batch (e.g. a
+	// mass revert with hundreds of failures) can't produce a megabyte-sized dialog message.
+	inline auto JoinTruncated(const TArray<FString>& InMessages, int32 InMaxLen = 1024) -> FString
+	{
+		FString Joined;
+		for (int32 Idx = 0; Idx < InMessages.Num(); ++Idx)
+		{
+			if (Idx > 0) { Joined += TEXT("\n"); }
+			Joined += InMessages[Idx];
+		}
+		if (Joined.Len() > InMaxLen)
+		{ Joined = Joined.Left(InMaxLen) + TEXT(" ..."); }
+		return Joined;
 	}
 
 	// One bucket of files that all live in the same repo (either the outer repo, or one
@@ -172,8 +194,18 @@ namespace gitlink::cmd
 			const FString SubmoduleRoot = InCtx.Provider.Get_SubmoduleRoot(File);
 			if (SubmoduleRoot.IsEmpty())
 			{
+				const FString Rel = ToRepoRelativePath(InCtx.RepoRootAbsolute, File);
+				if (Rel.IsEmpty())
+				{
+					// Not under the repo root at all — there is no repo to route this file to.
+					// Skipping (with a log) beats feeding a garbage pathspec to git.
+					UE_LOG(LogGitLink, Warning,
+						TEXT("PartitionByRepo: '%s' is outside the repository root '%s' — skipped"),
+						*File, *InCtx.RepoRootAbsolute);
+					continue;
+				}
 				OuterBatch.AbsoluteFiles.Add(File);
-				OuterBatch.RelativeFiles.Add(ToRepoRelativePath(InCtx.RepoRootAbsolute, File));
+				OuterBatch.RelativeFiles.Add(Rel);
 			}
 			else
 			{
@@ -293,9 +325,13 @@ namespace gitlink::cmd
 			// before unlocking, so the working tree should be clean. Omitting --force also
 			// avoids the "admin access required" error that occurs when the LFS server's
 			// lock owner identity (GitHub username) differs from git config user.name.
+			//
+			// `--` terminates option parsing so a path that begins with '-' can't be read as
+			// a git-lfs flag (same defense Cmd_Revert's RehydrateLfsForRepo uses).
 			TArray<FString> UnlockArgs;
-			UnlockArgs.Reserve(Batch.RelativeFiles.Num() + 1);
+			UnlockArgs.Reserve(Batch.RelativeFiles.Num() + 2);
 			UnlockArgs.Add(TEXT("unlock"));
+			UnlockArgs.Add(TEXT("--"));
 			UnlockArgs.Append(Batch.RelativeFiles);
 
 			const FString CwdOverride = Batch.bIsSubmodule ? Batch.RepoRoot : FString();

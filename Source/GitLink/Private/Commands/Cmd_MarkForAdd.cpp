@@ -37,12 +37,18 @@ namespace gitlink::cmd
 
 		const TArray<FRepoBatch> Batches = PartitionByRepo(InCtx, InFiles);
 
+		// Files whose batch failed (submodule wouldn't open, staging error). Excluded from the
+		// predictive Added/Staged stamping — stamping them anyway made the cache claim a stage
+		// that never happened — and surfaced as a non-fatal error so the user knows.
+		TSet<FString> FailedFiles;
+		TArray<FString> BatchErrors;
+
 		for (const FRepoBatch& Batch : Batches)
 		{
 			if (Batch.RelativeFiles.IsEmpty())
 			{ continue; }
 
-			gitlink::IRepository* TargetRepo = InCtx.Repository;
+			gitlink::IRepository* TargetRepo = InCtx.Repository.Get();
 			TUniquePtr<gitlink::FRepository> SubRepoOwned;
 
 			if (Batch.bIsSubmodule)
@@ -53,6 +59,9 @@ namespace gitlink::cmd
 					UE_LOG(LogGitLink, Warning,
 						TEXT("Cmd_MarkForAdd: could not open submodule repo at '%s' — skipping %d file(s)"),
 						*Batch.RepoRoot, Batch.AbsoluteFiles.Num());
+					FailedFiles.Append(Batch.AbsoluteFiles);
+					BatchErrors.Add(FString::Printf(
+						TEXT("could not open submodule repo at '%s'"), *Batch.RepoRoot));
 					continue;
 				}
 				TargetRepo = SubRepoOwned.Get();
@@ -64,14 +73,29 @@ namespace gitlink::cmd
 				UE_LOG(LogGitLink, Warning,
 					TEXT("Cmd_MarkForAdd: Stage failed (cwd='%s'): %s"),
 					*Batch.RepoRoot, *StageRes.ErrorMessage);
-				return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
+				FailedFiles.Append(Batch.AbsoluteFiles);
+				BatchErrors.Add(FString::Printf(
+					TEXT("staging in '%s' failed: %s"), *Batch.RepoRoot, *StageRes.ErrorMessage));
 			}
 		}
 
 		FCommandResult Result = FCommandResult::Ok();
+
+		if (!BatchErrors.IsEmpty())
+		{
+			Result.bOk = false;
+			Result.ErrorMessages.Add(FText::Format(
+				LOCTEXT("MarkForAddFailed", "Failed to mark {0} file(s) for add: {1}"),
+				FText::AsNumber(FailedFiles.Num()),
+				FText::FromString(JoinTruncated(BatchErrors))));
+		}
+
 		Result.UpdatedStates.Reserve(InFiles.Num());
 		for (const FString& File : InFiles)
 		{
+			if (FailedFiles.Contains(File))
+			{ continue; }
+
 			FGitLink_FileStateRef NewState = Make_FileState(
 				Normalize_AbsolutePath(File),
 				EGitLink_FileState::Added,

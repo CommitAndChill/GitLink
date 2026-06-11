@@ -97,10 +97,17 @@ auto FGitLink_CommandDispatcher::Dispatch(
 
 	gitlink::cmd::FCommandFn HandlerCopy = *Handler;
 
+	// Snapshot provider state into the context HERE, on the game thread — the only thread that
+	// reassigns the provider's Repository/Subprocess TSharedPtr slots and republishes the
+	// connect snapshot. Building it inside the async body (on a worker) raced Init(force=true):
+	// the worker could copy a TSharedPtr slot mid-reassignment. The context is moved into the
+	// body, which keeps the snapshotted objects alive for its whole run (v0.3.10 follow-up).
+	gitlink::cmd::FCommandContext Ctx = Build_Context(InChangelist);
+
 	if (InConcurrency == EConcurrency::Synchronous)
 	{
 		const ECommandResult::Type SyncResult =
-			Execute_AndComplete(MoveTemp(HandlerCopy), InOperation, InFiles, InCompleteDelegate, InChangelist);
+			Execute_AndComplete(MoveTemp(Ctx), MoveTemp(HandlerCopy), InOperation, InFiles, InCompleteDelegate);
 		return SyncResult;
 	}
 
@@ -110,21 +117,24 @@ auto FGitLink_CommandDispatcher::Dispatch(
 	// Account for the body BEFORE launching the task (we're on the game thread here, and so is
 	// Shutdown_AndDrain() — so this increment is guaranteed to be visible to any subsequent drain;
 	// there is no window where the task is queued but uncounted). The body decrements on the way
-	// out via ON_SCOPE_EXIT. While the count is non-zero, Close()-at-exit's drain keeps the
+	// out via ON_SCOPE_EXIT — through the by-value-captured shared counter, never through `this`,
+	// so even a body that outlives the 15s drain backstop can't corrupt freed dispatcher memory
+	// with its bookkeeping. While the count is non-zero, Close()-at-exit's drain keeps the
 	// provider alive, so the body can safely dereference it.
-	_InFlightBodies.fetch_add(1, std::memory_order_acq_rel);
+	_InFlightBodies->fetch_add(1, std::memory_order_acq_rel);
 	Async(EAsyncExecution::TaskGraph,
 		[
 			this,
 			Alive       = _Alive,
+			InFlight    = _InFlightBodies,
+			Ctx         = MoveTemp(Ctx),
 			HandlerCopy = MoveTemp(HandlerCopy),
 			OpRef       = InOperation,
 			Files       = InFiles,
-			Complete    = InCompleteDelegate,
-			Changelist  = InChangelist
+			Complete    = InCompleteDelegate
 		]() mutable
 		{
-			ON_SCOPE_EXIT { _InFlightBodies.fetch_sub(1, std::memory_order_acq_rel); };
+			ON_SCOPE_EXIT { InFlight->fetch_sub(1, std::memory_order_acq_rel); };
 
 			// Engine is tearing down — the provider (and this dispatcher) are about to be
 			// destroyed. Don't start dereferencing provider state; the drain in
@@ -133,23 +143,20 @@ auto FGitLink_CommandDispatcher::Dispatch(
 			if (IsEngineExitRequested() || !Alive->load(std::memory_order_acquire))
 			{ return; }
 
-			Execute_AndComplete(MoveTemp(HandlerCopy), MoveTemp(OpRef), MoveTemp(Files), MoveTemp(Complete), MoveTemp(Changelist));
+			Execute_AndComplete(MoveTemp(Ctx), MoveTemp(HandlerCopy), MoveTemp(OpRef), MoveTemp(Files), MoveTemp(Complete));
 		});
 
 	return ECommandResult::Succeeded;
 }
 
 // --------------------------------------------------------------------------------------------------------------------
-auto FGitLink_CommandDispatcher::Execute_AndComplete(
-	gitlink::cmd::FCommandFn        InHandler,
-	FSourceControlOperationRef      InOperation,
-	TArray<FString>                 InFiles,
-	FSourceControlOperationComplete InCompleteDelegate,
-	FSourceControlChangelistPtr     InChangelist) -> ECommandResult::Type
+auto FGitLink_CommandDispatcher::Build_Context(FSourceControlChangelistPtr InChangelist) -> gitlink::cmd::FCommandContext
 {
-	// Build the context snapshotting what the handler needs, so it doesn't have to touch provider
-	// internals while running.
-	gitlink::cmd::FCommandContext Ctx
+	// The TSharedPtr slots this snapshots are reassigned (game thread) without a lock; building
+	// the context anywhere else reintroduces the race this design exists to close.
+	ensureMsgf(IsInGameThread(), TEXT("Build_Context must run on the game thread"));
+
+	return gitlink::cmd::FCommandContext
 	{
 		.Provider               = _Owner,
 		.StateCache             = _Owner.Get_StateCache(),
@@ -158,12 +165,21 @@ auto FGitLink_CommandDispatcher::Execute_AndComplete(
 		.RepoRootAbsolute       = _Owner.Get_PathToRepositoryRoot(),
 		.DestinationChangelist  = InChangelist,
 	};
+}
 
+// --------------------------------------------------------------------------------------------------------------------
+auto FGitLink_CommandDispatcher::Execute_AndComplete(
+	gitlink::cmd::FCommandContext   InContext,
+	gitlink::cmd::FCommandFn        InHandler,
+	FSourceControlOperationRef      InOperation,
+	TArray<FString>                 InFiles,
+	FSourceControlOperationComplete InCompleteDelegate) -> ECommandResult::Type
+{
 	gitlink::cmd::FCommandResult Result;
 	{
 		// Invoke the handler. Any exceptions here are a programming error — we don't have
 		// exception handling in UE code, so a bug would terminate, which is what we want.
-		Result = InHandler(Ctx, InOperation, InFiles);
+		Result = InHandler(InContext, InOperation, InFiles);
 	}
 
 	const bool bCommandOk = Result.bOk;
@@ -266,7 +282,7 @@ auto FGitLink_CommandDispatcher::Shutdown_AndDrain() -> void
 	// early-outs inside the LFS poll fan-out make each body return promptly during exit, so in
 	// practice this returns almost immediately; the timeout below is a defensive backstop only.
 	const double StartSec = FPlatformTime::Seconds();
-	while (_InFlightBodies.load(std::memory_order_acquire) > 0)
+	while (_InFlightBodies->load(std::memory_order_acquire) > 0)
 	{
 		FPlatformProcess::Sleep(0.001f);
 
@@ -275,7 +291,7 @@ auto FGitLink_CommandDispatcher::Shutdown_AndDrain() -> void
 			UE_LOG(LogGitLink, Warning,
 				TEXT("Shutdown_AndDrain: timed out after 15s with %d command body(ies) still ")
 				TEXT("in flight; proceeding with teardown"),
-				_InFlightBodies.load(std::memory_order_acquire));
+				_InFlightBodies->load(std::memory_order_acquire));
 			break;
 		}
 	}

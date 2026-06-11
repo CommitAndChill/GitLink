@@ -17,9 +17,12 @@ struct git_repository;
 //
 // Thread safety:
 //   Every call that touches the underlying git_repository* takes the owning FCriticalSection exclusively,
-//   because libgit2 is NOT thread-safe for concurrent access to the same repository object. Long-running
-//   reads (log walk, status enumeration) should prefer FAsyncStatusProvider, which opens a FRESH
-//   git_repository* per query to side-step the stat cache.
+//   because libgit2 is NOT thread-safe for concurrent access to the same repository object. Background
+//   queries should open a FRESH FRepository per query rather than sharing one instance across threads —
+//   this is the convention Cmd_UpdateStatus's per-submodule status sweep follows — which side-steps both
+//   lock contention and libgit2's stat cache. Note that network operations (Fetch/Push/PullFastForward)
+//   hold the repository mutex for the FULL transfer, so other threads' calls on the same FRepository
+//   block for the duration; FProgressCallback is invoked with that lock held and must not block.
 // --------------------------------------------------------------------------------------------------------------------
 
 namespace gitlink

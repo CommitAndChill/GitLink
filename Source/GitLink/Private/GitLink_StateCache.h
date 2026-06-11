@@ -23,14 +23,13 @@ public:
 	// Fetches an existing state, or creates a default-constructed one if absent. Always returns a valid ref.
 	auto GetOrCreate_FileState(const FString& InFilename) -> FGitLink_FileStateRef;
 
-	// Read-only lookup. Returns nullptr if absent.
+	// Read-only lookup. Returns the cached state if present, otherwise a fresh
+	// default-constructed state that is NOT inserted into the cache — callers that need to
+	// distinguish "absent" from "present but default" should use Enumerate_FileStates.
 	auto Find_FileState(const FString& InFilename) const -> FGitLink_FileStateRef;
 
 	// Overwrite or insert a file state.
 	auto Set_FileState(const FString& InFilename, FGitLink_FileStateRef InState) -> void;
-
-	// Remove a file from the cache. Returns true if it was present.
-	auto Remove_FileState(const FString& InFilename) -> bool;
 
 	// Snapshot all cached files for GetCachedStateByPredicate.
 	auto Enumerate_FileStates(TFunctionRef<bool(const FGitLink_FileStateRef&)> InPredicate) const
@@ -45,14 +44,6 @@ public:
 	auto Find_ChangelistState(const FGitLink_Changelist& InChangelist) const -> FGitLink_ChangelistStateRef;
 	auto Set_ChangelistState(const FGitLink_Changelist& InChangelist, FGitLink_ChangelistStateRef InState) -> void;
 	auto Enumerate_Changelists() const -> TArray<FGitLink_ChangelistStateRef>;
-
-	// --- Ignore-force helpers ---
-	// Unreal's source control often issues a redundant UpdateStatus immediately after an operation.
-	// Add a file to this set so the next UpdateStatus leaves it alone.
-
-	auto Add_IgnoreForceRefresh   (const FString& InFilename) -> bool;  // true if inserted
-	auto Remove_IgnoreForceRefresh(const FString& InFilename) -> bool;  // true if removed
-	auto ShouldIgnoreForceRefresh (const FString& InFilename) const -> bool;
 
 	// Called by the provider after connect to install a snapshot of submodule paths.
 	// New cache entries whose key starts with a submodule prefix are stamped Unlockable
@@ -74,7 +65,4 @@ private:
 
 	mutable FRWLock _ChangelistStatesLock;
 	TMap<FGitLink_Changelist, FGitLink_ChangelistStateRef> _ChangelistStates;
-
-	mutable FCriticalSection _IgnoreForceLock;
-	TSet<FString> _IgnoreForceRefresh;
 };

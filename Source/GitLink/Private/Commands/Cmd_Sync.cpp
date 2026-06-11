@@ -1,5 +1,8 @@
 #include "GitLink_CommandDispatcher.h"
+#include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
+
+#include "GitLink/GitLink_Provider.h"
 
 #include "GitLinkCore/Repository/GitLink_Repository.h"
 #include "GitLinkCore/Repository/GitLink_Repository_Params.h"
@@ -40,6 +43,31 @@ namespace gitlink::cmd
 		}
 
 		UE_LOG(LogGitLink, Log, TEXT("Cmd_Sync: pull complete (fast-forward)"));
+
+		// Rehydrate LFS content. PullFastForward checks out via libgit2, which does NOT run
+		// Git's smudge filters — any LFS-tracked file whose blob changed lands on disk as its
+		// ~132-byte pointer text and Unreal fails to load the asset (the same bug shape
+		// Cmd_Revert's v0.3.4 fix addressed). Unlike the revert case, freshly-pulled LFS
+		// objects have never been downloaded (git_remote_fetch transfers only git objects; the
+		// LFS transfer protocol is a separate channel), so this must be `git lfs pull` — it
+		// fetches missing objects AND re-runs checkout. Idempotent; no-op when nothing changed.
+		// Failure is non-fatal: the pull itself succeeded, and recovery is a manual
+		// `git lfs pull`.
+		//
+		// Sync only pulls the parent repo (no submodule partitioning yet), so a single
+		// parent-rooted rehydration matches its scope. If Sync grows submodule support, route
+		// per-submodule via the cwdOverride like Cmd_Revert's RehydrateLfsForRepo.
+		if (InCtx.Subprocess != nullptr && InCtx.Subprocess->IsValid() && InCtx.Provider.Is_LfsAvailable())
+		{
+			const FGitLink_SubprocessResult LfsRes = InCtx.Subprocess->RunLfs({ TEXT("pull") }, FString());
+			if (!LfsRes.IsSuccess())
+			{
+				UE_LOG(LogGitLink, Warning,
+					TEXT("Cmd_Sync: 'git lfs pull' rehydration returned %d: %s — LFS-tracked files ")
+					TEXT("may be pointer text on disk; run `git lfs pull` manually to recover"),
+					LfsRes.ExitCode, *LfsRes.StdErr);
+			}
+		}
 
 		// UpdateStates is left empty — after a fast-forward the editor will re-query via an
 		// automatic UpdateStatus if anything changed on disk, which is when the real per-file

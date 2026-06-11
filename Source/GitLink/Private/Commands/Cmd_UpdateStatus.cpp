@@ -130,8 +130,10 @@ namespace gitlink::cmd
 		{
 			FGitLink_History History;
 
-			// Determine which repo to query and the relative path within it.
-			gitlink::FRepository* RepoToQuery = InCtx.Repository;
+			// Determine which repo to query and the relative path within it. Raw pointer is safe
+			// here: it aliases either the context's TSharedPtr (alive for the command body's
+			// lifetime) or the locally-owned SubmoduleRepo below.
+			gitlink::FRepository* RepoToQuery = InCtx.Repository.Get();
 			TUniquePtr<gitlink::FRepository> SubmoduleRepo;
 			FString RelativePath;
 			FString RepoRoot = InCtx.RepoRootAbsolute;
@@ -276,9 +278,17 @@ namespace gitlink::cmd
 			// background poll (30s interval) but is skipped on save-triggered immediate polls
 			// that fall inside the throttle window. Without this, every save would re-run
 			// 34 git status walks + 34 LFS network calls, causing visible CPU spikes.
+			//
+			// Exception: when called from Cmd_Connect (op name "Connect"), the sweep always
+			// runs. Connect follows a Close() that cleared the state cache, so the carry-forward
+			// has nothing to carry — skipping the sweep there would leave every lock invisible
+			// until the next timer poll (up to ~2 minutes). This is also what makes Connect's
+			// own duplicate lock-discovery stage unnecessary (it was deleted; it lacked the
+			// bSuccess gating below and double-polled every repo on first connect).
 			const double NowSec = FPlatformTime::Seconds();
 			const double LastSweep = GLastFullSweepSec.Load();
-			const bool bRunSweep = (NowSec - LastSweep) >= GFullSweepThrottleSec;
+			const bool bForceSweep = InOperation->GetName() == TEXT("Connect");
+			const bool bRunSweep = bForceSweep || (NowSec - LastSweep) >= GFullSweepThrottleSec;
 
 			const TArray<FString> SubmodulePaths = InCtx.Provider.Get_SubmodulePaths();
 			TSet<FString> SuccessfullyPolledRepos;  // absolute roots whose LFS poll returned trustworthy data
@@ -425,6 +435,15 @@ namespace gitlink::cmd
 
 				int32 LockChanges = 0;
 
+				// One-shot index of the states emitted so far, keyed by filename (FString map
+				// lookups are case-insensitive). The previous per-lock linear scan over
+				// UpdatedStates was O(locks × emitted-states) — with the whole tracked index
+				// emitted at connect and a few hundred locks, millions of string compares.
+				TMap<FString, FGitLink_FileStateRef> EmittedByPath;
+				EmittedByPath.Reserve(Result.UpdatedStates.Num());
+				for (const FGitLink_FileStateRef& State : Result.UpdatedStates)
+				{ EmittedByPath.Add(State->GetFilename(), State); }
+
 				for (const auto& [Absolute, LockOwner] : RemoteLocksAbs)
 				{
 					// Replica-lag guard: if we just locked or unlocked this file locally
@@ -440,23 +459,16 @@ namespace gitlink::cmd
 						: EGitLink_LockState::LockedOther;
 
 					// Check if this lock is already correctly represented in our emitted states.
-					bool bAlreadyEmitted = false;
-					for (const FGitLink_FileStateRef& State : Result.UpdatedStates)
+					if (const FGitLink_FileStateRef* Emitted = EmittedByPath.Find(Absolute))
 					{
-						if (State->GetFilename().Equals(Absolute, ESearchCase::IgnoreCase))
+						if ((*Emitted)->_State.Lock != NewLockState || (*Emitted)->_State.LockUser != LockOwner)
 						{
-							if (State->_State.Lock != NewLockState || State->_State.LockUser != LockOwner)
-							{
-								State->_State.Lock     = NewLockState;
-								State->_State.LockUser = LockOwner;
-								++LockChanges;
-							}
-							bAlreadyEmitted = true;
-							break;
+							(*Emitted)->_State.Lock     = NewLockState;
+							(*Emitted)->_State.LockUser = LockOwner;
+							++LockChanges;
 						}
 					}
-
-					if (!bAlreadyEmitted)
+					else
 					{
 						// File is locked but not dirty — check if cache already has the right state.
 						const FGitLink_FileStateRef Existing = InCtx.StateCache.Find_FileState(Absolute);
@@ -590,8 +602,11 @@ namespace gitlink::cmd
 
 			for (const FString& RequestedRaw : InFiles)
 			{
-				FString Normalized = RequestedRaw;
-				FPaths::NormalizeFilename(Normalized);
+				// Normalize_AbsolutePath (not bare NormalizeFilename): CompositeByPath keys are
+				// absolute, and the editor sometimes passes paths relative to
+				// Engine/Binaries/Win64/ — a relative key here would miss the dirty map and
+				// misreport a modified file as clean (and take the wrong submodule branch below).
+				const FString Normalized = Normalize_AbsolutePath(RequestedRaw);
 
 				if (const FGitLink_CompositeState* Hit = CompositeByPath.Find(Normalized))
 				{
@@ -613,8 +628,8 @@ namespace gitlink::cmd
 					// Tree=Unmodified — which makes CanCheckout return true and the editor
 					// auto-prompts to LFS-lock a file that isn't even in git yet (and revert
 					// can't break the cycle: unlock succeeds but the next save re-locks it).
-					// IsSourceControlled() forces true for submodule files so History stays
-					// enabled regardless of the Tree value here.
+					// History/Diff stay enabled for tracked submodule files because their Tree
+					// lands on Unmodified here (IsSourceControlled is Tree-driven since v0.2.0).
 					const bool bInSubmodule = InCtx.Provider.Is_InSubmodule(Normalized);
 					Clean.bInSubmodule = bInSubmodule;
 
@@ -641,9 +656,6 @@ namespace gitlink::cmd
 			InFiles.Num(),
 			CompositeByPath.Num(),
 			Result.UpdatedStates.Num());
-
-		// Unused in this command but satisfies -Wunused-parameter without adding /*_*/.
-		(void)InOperation;
 
 		return Result;
 	}
