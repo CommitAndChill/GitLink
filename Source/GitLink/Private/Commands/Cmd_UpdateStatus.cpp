@@ -36,6 +36,16 @@ namespace
 	// for "someone else locked this file".
 	TAtomic<double> GLastFullSweepSec{0.0};
 	constexpr double GFullSweepThrottleSec = 110.0;
+
+	// Cap on how many per-file LFS lock probes the pre-checkout UpdateStatus may fire when the
+	// full sweep is stale. Each probe is an async HTTPS GET on a fresh-ish connection; firing one
+	// per requested file (a bulk OFPA actor-delete hands UpdateStatus many external-actor
+	// packages) opens a burst of concurrent connections that, on a flaky network, trips GitHub
+	// connection throttling and makes the concurrent `git lfs lock` (Cmd_CheckOut) connect time
+	// out — the OFPA "check out after deleting an actor → multi-second hang". Correctness doesn't
+	// need the probe (the full sweep + the server-authoritative lock cover it); it's only
+	// proactive freshness, so capping the burst is safe. Drop to 1 if 2 still storms.
+	constexpr int32 GMaxPreCheckoutProbeFiles = 2;
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -594,9 +604,20 @@ namespace gitlink::cmd
 				&& InCtx.Provider.Is_LfsAvailable()
 				&& InCtx.Provider.Get_LfsHttpClient().IsValid())
 			{
-				for (const FString& RequestedRaw : InFiles)
+				// Skip the probe burst when the full sweep already refreshed lock state
+				// (cache is current); otherwise cap it. N concurrent LFS probes (one per
+				// requested file — a bulk OFPA actor-delete hands UpdateStatus many external-
+				// actor packages) saturate a flaky network and trip GitHub connection
+				// throttling, which then makes the concurrent `git lfs lock` (Cmd_CheckOut)
+				// connect time out — the OFPA "check out after deleting an actor → multi-second
+				// hang". Correctness is covered by the full sweep + the server-authoritative
+				// lock; this probe is only proactive freshness.
+				const double NowSec      = FPlatformTime::Seconds();
+				const bool   bSweepFresh = (NowSec - GLastFullSweepSec.Load()) < GFullSweepThrottleSec;
+				const int32  ProbeCount  = bSweepFresh ? 0 : FMath::Min(InFiles.Num(), GMaxPreCheckoutProbeFiles);
+				for (int32 Idx = 0; Idx < ProbeCount; ++Idx)
 				{
-					InCtx.Provider.Request_LockRefreshForFile(RequestedRaw);
+					InCtx.Provider.Request_LockRefreshForFile(InFiles[Idx]);
 				}
 			}
 
