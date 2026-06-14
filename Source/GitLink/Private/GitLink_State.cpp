@@ -373,7 +373,14 @@ auto FGitLink_FileState::CanDelete() const -> bool
 	// Submodule files are deletable from the parent project's SCC. Cmd_Delete partitions
 	// the input batch by submodule root and stages each deletion in the correct inner
 	// repo. The actual `git commit` is left to the user inside the submodule.
-	return IsSourceControlled() && _State.File != EGitLink_FileState::Deleted;
+	//
+	// Blocked when a teammate holds the LFS lock (LockedOther): deleting + committing would
+	// stomp a file someone else has checked out for editing. Mirrors CanCheckout's guard —
+	// the read-only-on-disk bit is NOT what protects this (git-lfs keeps every unlocked
+	// lockable file read-only), so the lock state must be checked explicitly.
+	return IsSourceControlled()
+	    && _State.File != EGitLink_FileState::Deleted
+	    && _State.Lock != EGitLink_LockState::LockedOther;
 }
 
 auto FGitLink_FileState::IsConflicted() const -> bool

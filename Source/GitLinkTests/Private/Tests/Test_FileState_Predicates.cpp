@@ -393,6 +393,8 @@ bool FGitLinkTests_FileState_LockedOther_NotEditable::RunTest(const FString& /*P
 			F.CanCheckout());
 		TestFalse(*FString::Printf(TEXT("CanEdit false when locked by other %s"),     Tag),
 			F.CanEdit());
+		TestFalse(*FString::Printf(TEXT("CanDelete false when locked by other %s"),   Tag),
+			F.CanDelete());
 		TestEqual(*FString::Printf(TEXT("Status icon is LockedOther %s"),             Tag),
 			static_cast<uint8>(F.Get_OverallStatus()),
 			static_cast<uint8>(EGitLink_Status::LockedOther));

@@ -10,12 +10,14 @@
 
 // --------------------------------------------------------------------------------------------------------------------
 // Cmd_Delete — "git rm <files>". The editor invokes this when the user deletes a source-
-// controlled asset. By the time we're called, the editor has already removed the .uasset from
-// disk, so we just need to stage the deletion via git_index_add_all (which picks up missing
-// files as index removals).
+// controlled asset. We remove the working-tree file from disk and stage the deletion via
+// git_index_add_all (which picks up missing files as index removals).
 //
-// For safety we also remove any stragglers still on disk — happens when the editor only marks
-// an asset for deletion but doesn't actually unlink.
+// The on-disk removal is load-bearing, not just a safety net: lockable assets (.uasset/.umap)
+// are kept READ-ONLY by git-lfs until locked, and a plain delete never runs the checkout
+// (lock) path — so the file is read-only here, and IPlatformFile::DeleteFile (a bare
+// DeleteFileW on Windows) fails ACCESS_DENIED unless we clear the read-only bit first. See
+// the disk-removal loop below.
 //
 // Submodule files: input batch is partitioned by submodule root. Files in the outer repo are
 // staged against InCtx.Repository as before; files inside a submodule are staged against a
@@ -59,12 +61,26 @@ namespace gitlink::cmd
 		IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 		for (const FString& File : InFiles)
 		{
-			if (PlatformFile.FileExists(*File) && !PlatformFile.DeleteFile(*File))
+			if (!PlatformFile.FileExists(*File))
+			{ continue; }  // editor already unlinked it — the stage step records the deletion
+
+			// Lockable assets (.uasset/.umap) are kept read-only on disk by git-lfs until WE
+			// hold the lock. A plain delete never runs the checkout (git lfs lock) path, so the
+			// file is still read-only here — and IPlatformFile::DeleteFile is a bare DeleteFileW
+			// that fails with ACCESS_DENIED on read-only files. Clear the attribute first (the
+			// same thing the lock path would have done) so the unlink can actually succeed.
+			if (PlatformFile.IsReadOnly(*File))
+			{ PlatformFile.SetReadOnly(*File, false); }
+
+			if (!PlatformFile.DeleteFile(*File))
 			{
+				// Read-only is already cleared, so a remaining failure is genuine — most likely
+				// an open handle held by another process. Don't stage it: the file is still on
+				// disk, and staging would record its current content instead of a deletion.
 				UE_LOG(LogGitLink, Warning,
-					TEXT("Cmd_Delete: could not delete '%s' from disk (file in use?) — skipping"), *File);
+					TEXT("Cmd_Delete: could not delete '%s' from disk (open handle?) — skipping"), *File);
 				FailedFiles.Add(File);
-				BatchErrors.Add(FString::Printf(TEXT("could not delete '%s' from disk"), *File));
+				BatchErrors.Add(FString::Printf(TEXT("could not delete '%s' from disk (open handle?)"), *File));
 			}
 		}
 
