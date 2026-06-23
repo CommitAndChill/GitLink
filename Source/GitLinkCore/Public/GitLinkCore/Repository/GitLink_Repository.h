@@ -47,13 +47,23 @@ namespace gitlink
 
 		// Index manipulation --------------------------------------------------------------------------------------------
 
-		/** Stage files by repo-relative paths (equivalent to `git add`). Paths must be relative to the repo root. */
+		/**
+		 * Stage files by repo-relative paths via libgit2's git_index_add_all. Paths must be relative to the repo root.
+		 *
+		 * WARNING — this BYPASSES Git's clean/smudge FILTER DRIVERS (git-lfs included). libgit2 runs only its built-in
+		 * filters, so an LFS-tracked path (.uasset/.umap/.png/...) is staged as its RAW bytes, NOT the ~130-byte LFS
+		 * pointer — and a later commit (even one made by the git CLI) then ships that raw blob into history, defeating
+		 * LFS. Command-layer code that stages working-tree content the user will commit MUST instead route through
+		 * gitlink::cmd::Stage_ViaGit (subprocess `git add`, which runs the filter). This entry point is for tests and
+		 * non-LFS internal use only. See GitLink CLAUDE.md v0.4.3.
+		 */
 		virtual auto Stage         (const TArray<FString>& InPaths) -> FResult = 0;
 
 		/** Unstage files by repo-relative paths (equivalent to `git restore --staged`). */
 		virtual auto Unstage       (const TArray<FString>& InPaths) -> FResult = 0;
 
-		/** Stage all dirty files in the working tree. Caution: also stages submodule directories. */
+		/** Stage all dirty files in the working tree. Caution: also stages submodule directories. Same LFS-filter
+		 *  bypass caveat as Stage() — do not use for LFS-tracked working-tree content. */
 		virtual auto StageAll      ()                              -> FResult = 0;
 
 		/** Unstage everything — resets the entire index to HEAD. */
@@ -61,6 +71,13 @@ namespace gitlink
 
 		/** Discard working-tree changes for the given repo-relative paths (equivalent to `git checkout HEAD -- <paths>`). */
 		virtual auto DiscardChanges(const TArray<FString>& InPaths) -> FResult = 0;
+
+		/**
+		 * Re-read the index from disk into libgit2's in-memory copy (git_index_read, force=true). Required after an
+		 * out-of-process `git add` (gitlink::cmd::Stage_ViaGit) mutates .git/index, so a subsequent IN-PROCESS
+		 * Get_Status / Commit on THIS repository sees the staged entries instead of libgit2's stale cached index.
+		 */
+		virtual auto Reload_Index() -> FResult = 0;
 
 		// Commits -------------------------------------------------------------------------------------------------------
 
@@ -126,6 +143,7 @@ namespace gitlink
 		auto StageAll      ()                              -> FResult override;
 		auto UnstageAll    ()                              -> FResult override;
 		auto DiscardChanges(const TArray<FString>& InPaths) -> FResult override;
+		auto Reload_Index  ()                              -> FResult override;
 
 		auto Commit(const FCommitParams& InParams) -> FResult override;
 

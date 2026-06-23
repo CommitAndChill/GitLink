@@ -67,7 +67,9 @@ namespace gitlink::cmd
 				TargetRepo = SubRepoOwned.Get();
 			}
 
-			const FResult StageRes = TargetRepo->Stage(Batch.RelativeFiles);
+			const FResult StageRes = Stage_ViaGit(
+				*TargetRepo, InCtx.Subprocess.Get(),
+				Batch.bIsSubmodule ? Batch.RepoRoot : FString(), Batch.RelativeFiles);
 			if (!StageRes)
 			{
 				UE_LOG(LogGitLink, Warning,

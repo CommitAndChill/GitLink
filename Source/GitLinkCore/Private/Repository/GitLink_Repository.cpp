@@ -190,6 +190,7 @@ namespace gitlink
 	auto FRepository::StageAll()                                     -> FResult { return op::StageAll(*this); }
 	auto FRepository::UnstageAll()                                   -> FResult { return op::UnstageAll(*this); }
 	auto FRepository::DiscardChanges(const TArray<FString>& InPaths) -> FResult { return op::DiscardChanges(*this, InPaths); }
+	auto FRepository::Reload_Index()                                 -> FResult { return op::ReloadIndex(*this); }
 
 	auto FRepository::Commit(const FCommitParams& InParams) -> FResult { return op::CreateCommit(*this, InParams); }
 

@@ -12,6 +12,7 @@
 #include <Misc/DateTime.h>
 #include <Misc/Paths.h>
 
+#include "GitLinkCore/Repository/GitLink_Repository.h"
 #include "GitLinkCore/Types/GitLink_Types.h"
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -229,6 +230,77 @@ namespace gitlink::cmd
 		{ Out.Add(MoveTemp(OuterBatch)); }
 		Out.Append(MoveTemp(Subs));
 		return Out;
+	}
+
+	// Stages the given REPO-RELATIVE paths through a `git add` SUBPROCESS instead of libgit2's
+	// git_index_add_all. This is load-bearing for Git-LFS: libgit2 does NOT run Git's clean filter
+	// drivers (and GitLink registers none), so IRepository::Stage writes an LFS-tracked path's RAW
+	// bytes into the index instead of the ~130-byte LFS pointer — and a later commit, even one made
+	// by the git CLI, then ships that raw blob into history, defeating LFS. Routing through `git add`
+	// runs the git-lfs clean filter, so the index gets the pointer and the object is written to
+	// .git/lfs/objects. Mirrors the subprocess-for-LFS pattern every other LFS touchpoint already
+	// uses (CheckOut's `git lfs lock`, Revert's `git lfs checkout`).
+	//
+	//   -A : match git_index_add_all's new+modified+DELETED semantics. Cmd_Delete stages removals
+	//        through this helper (the file is already unlinked on disk), and plain `git add <path>`
+	//        would NOT record a deletion — only `git add -A` (or `git rm`) does.
+	//   -- : terminate flag parsing so a path beginning with '-' can't be read as a git flag.
+	//
+	// InCwdOverride routes into a submodule's working tree (empty = parent repo) so the submodule's
+	// own git/LFS config is picked up — same contract as FGitLink_Subprocess::Run. InRepo is the
+	// libgit2 handle for that SAME repo; after the subprocess rewrites .git/index, we reload InRepo's
+	// in-memory index (Reload_Index) so a following in-process Get_Status/Commit on it isn't stale.
+	//
+	// Requires a valid subprocess. If none is configured (no git binary — a degenerate setup with no
+	// git-lfs either), this FAILS rather than silently falling back to libgit2: a raw-staged LFS file
+	// is the precise corruption this fixes, so the invariant "GitLink never raw-stages an LFS path"
+	// stays absolute and the failure is loud and diagnosable instead of silent.
+	inline auto Stage_ViaGit(
+		gitlink::IRepository&  InRepo,
+		FGitLink_Subprocess*   InSubprocess,
+		const FString&         InCwdOverride,
+		const TArray<FString>& InRepoRelativePaths) -> gitlink::FResult
+	{
+		if (InRepoRelativePaths.IsEmpty())
+		{ return gitlink::FResult::Ok(); }
+
+		if (InSubprocess == nullptr || !InSubprocess->IsValid())
+		{
+			return gitlink::FResult::Fail(TEXT(
+				"Stage_ViaGit: git subprocess unavailable — refusing to stage via libgit2, which would "
+				"write LFS-tracked files into the index as raw binary instead of pointers. Ensure a git "
+				"binary is on PATH (or set GitBinaryOverride) and reconnect."));
+		}
+
+		TArray<FString> Args;
+		Args.Reserve(InRepoRelativePaths.Num() + 3);
+		Args.Add(TEXT("add"));
+		Args.Add(TEXT("-A"));
+		Args.Add(TEXT("--"));
+		Args.Append(InRepoRelativePaths);
+
+		const FGitLink_SubprocessResult AddResult = InSubprocess->Run(Args, InCwdOverride);
+		if (!AddResult.IsSuccess())
+		{
+			return gitlink::FResult::Fail(FString::Printf(
+				TEXT("git add failed (cwd='%s', exit=%d): %s"),
+				InCwdOverride.IsEmpty() ? TEXT("<repo root>") : *InCwdOverride,
+				AddResult.ExitCode, *AddResult.Get_CombinedError()));
+		}
+
+		// Sync libgit2's cached index to what the subprocess just wrote to disk. Non-fatal on failure:
+		// the on-disk index (what persists and what a subprocess commit reads) is already correct; only
+		// an in-process libgit2 commit on this same handle would care, and Get_Status's own refresh is a
+		// backstop. A reload failure is near-impossible (the index file exists post-`git add`).
+		const gitlink::FResult ReloadResult = InRepo.Reload_Index();
+		if (!ReloadResult)
+		{
+			UE_LOG(LogGitLink, Warning,
+				TEXT("Stage_ViaGit: staged via `git add` but failed to reload libgit2 index (cwd='%s'): %s"),
+				InCwdOverride.IsEmpty() ? TEXT("<repo root>") : *InCwdOverride, *ReloadResult.ErrorMessage);
+		}
+
+		return gitlink::FResult::Ok();
 	}
 
 	// Outcome of an unlock attempt across a batch of files. Successful files are split out

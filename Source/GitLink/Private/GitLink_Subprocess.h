@@ -21,8 +21,24 @@ struct FGitLink_SubprocessResult
 	auto IsSuccess() const -> bool { return bSpawned && ExitCode == 0; }
 
 	// Combined human-readable error string for UI toasts. Prefers stderr, falls back to stdout,
-	// then to a synthetic "exited with code N" message.
-	auto Get_CombinedError() const -> FString;
+	// then to a synthetic "exited with code N" message. Defined inline (like IsSuccess above) so
+	// cross-module callers — GitLinkTests via Cmd_Shared.h's Stage_ViaGit — resolve it without a
+	// DLL-exported symbol (the struct itself is not GITLINK_API).
+	auto Get_CombinedError() const -> FString
+	{
+		const FString TrimmedErr = StdErr.TrimStartAndEnd();
+		if (!TrimmedErr.IsEmpty())
+		{ return TrimmedErr; }
+
+		const FString TrimmedOut = StdOut.TrimStartAndEnd();
+		if (!TrimmedOut.IsEmpty())
+		{ return TrimmedOut; }
+
+		if (!bSpawned)
+		{ return TEXT("(git could not be launched)"); }
+
+		return FString::Printf(TEXT("git exited with code %d"), ExitCode);
+	}
 };
 
 // --------------------------------------------------------------------------------------------------------------------
