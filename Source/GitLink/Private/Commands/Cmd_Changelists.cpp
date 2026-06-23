@@ -115,7 +115,8 @@ namespace gitlink::cmd
 
 			// Working → Staged = git add; Staged → Working = git restore --staged.
 			const FResult OpResult = bToStaged
-				? TargetRepo->Stage(Batch.RelativeFiles)
+				? Stage_ViaGit(*TargetRepo, InCtx.Subprocess.Get(),
+					Batch.bIsSubmodule ? Batch.RepoRoot : FString(), Batch.RelativeFiles)
 				: TargetRepo->Unstage(Batch.RelativeFiles);
 
 			if (!OpResult)

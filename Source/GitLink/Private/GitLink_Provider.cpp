@@ -634,7 +634,36 @@ auto FGitLink_Provider::OnPackageSaved(const FString& InFilename) -> void
 				RelPath.RightChopInline(Snap->PathToRepositoryRoot.Len(), EAllowShrinking::No);
 				RelPath.RemoveFromStart(TEXT("/"));
 			}
-			_Repository->Stage({ RelPath });
+
+			// Re-stage through `git add` (subprocess), NOT _Repository->Stage (libgit2 git_index_add_all).
+			// libgit2 bypasses Git's clean filter drivers, so re-staging a saved .uasset that way rewrites
+			// the index entry as RAW binary instead of an LFS pointer — exactly how raw blobs leaked into
+			// LFS-tracked paths. `git add` runs the git-lfs clean filter; Reload_Index then syncs libgit2's
+			// in-memory index to what the subprocess wrote. Runs on the game thread (this is a save
+			// callback) but only for the rare save-of-an-already-staged file, so the one git spawn is
+			// acceptable; the commit re-stages regardless, so this is purely View-Changes display freshness.
+			const TSharedPtr<FGitLink_Subprocess> Sub = _Subprocess;
+			if (Sub.IsValid() && Sub->IsValid())
+			{
+				const FGitLink_SubprocessResult AddResult =
+					Sub->Run({ TEXT("add"), TEXT("-A"), TEXT("--"), RelPath });
+				if (AddResult.IsSuccess())
+				{
+					_Repository->Reload_Index();
+				}
+				else
+				{
+					UE_LOG(LogGitLink, Warning,
+						TEXT("OnPackageSaved: `git add` re-stage of '%s' failed (exit=%d): %s"),
+						*RelPath, AddResult.ExitCode, *AddResult.Get_CombinedError());
+				}
+			}
+			else
+			{
+				UE_LOG(LogGitLink, Warning,
+					TEXT("OnPackageSaved: git subprocess unavailable — skipping re-stage of '%s' ")
+					TEXT("(declining to raw-stage via libgit2)"), *RelPath);
+			}
 		}
 	}
 

@@ -48,7 +48,8 @@ namespace gitlink::cmd
 				TEXT("Cmd_CheckIn: staging %d outer-repo file(s) (first: '%s')"),
 				StageRelPaths.Num(), *StageRelPaths[0]);
 
-			const FResult StageRes = InCtx.Repository->Stage(StageRelPaths);
+			const FResult StageRes = Stage_ViaGit(
+				*InCtx.Repository, InCtx.Subprocess.Get(), FString(), StageRelPaths);
 			if (!StageRes)
 			{
 				return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));
@@ -107,7 +108,8 @@ namespace gitlink::cmd
 				if (FilesToRestage.IsEmpty())
 				{ return; }
 
-				const FResult RestageRes = InCtx.Repository->Stage(FilesToRestage);
+				const FResult RestageRes = Stage_ViaGit(
+					*InCtx.Repository, InCtx.Subprocess.Get(), FString(), FilesToRestage);
 				if (!RestageRes)
 				{
 					UE_LOG(LogGitLink, Warning,
@@ -176,7 +178,8 @@ namespace gitlink::cmd
 				TEXT("Cmd_CheckIn: staging %d file(s) in submodule '%s'"),
 				InBatch.RelativeFiles.Num(), *InBatch.RepoRoot);
 
-			const FResult StageRes = SubRepo->Stage(InBatch.RelativeFiles);
+			const FResult StageRes = Stage_ViaGit(
+				*SubRepo, InCtx.Subprocess.Get(), InBatch.RepoRoot, InBatch.RelativeFiles);
 			if (!StageRes)
 			{
 				return FCommandResult::Fail(FText::FromString(StageRes.ErrorMessage));

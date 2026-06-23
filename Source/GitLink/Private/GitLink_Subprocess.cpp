@@ -88,24 +88,6 @@ namespace
 
 // --------------------------------------------------------------------------------------------------------------------
 
-auto FGitLink_SubprocessResult::Get_CombinedError() const -> FString
-{
-	const FString TrimmedErr = StdErr.TrimStartAndEnd();
-	if (!TrimmedErr.IsEmpty())
-	{ return TrimmedErr; }
-
-	const FString TrimmedOut = StdOut.TrimStartAndEnd();
-	if (!TrimmedOut.IsEmpty())
-	{ return TrimmedOut; }
-
-	if (!bSpawned)
-	{ return TEXT("(git could not be launched)"); }
-
-	return FString::Printf(TEXT("git exited with code %d"), ExitCode);
-}
-
-// --------------------------------------------------------------------------------------------------------------------
-
 FGitLink_Subprocess::FGitLink_Subprocess(FString InGitBinary, FString InWorkingDirectory)
 	: _GitBinary(MoveTemp(InGitBinary))
 	, _WorkingDirectory(MoveTemp(InWorkingDirectory))

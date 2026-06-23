@@ -36,6 +36,10 @@ namespace gitlink::op
 	GITLINKCORE_API auto UnstageAll     (FRepository& InRepo) -> FResult;
 	GITLINKCORE_API auto DiscardChanges (FRepository& InRepo, const TArray<FString>& InPaths) -> FResult;
 
+	// Re-read .git/index from disk into libgit2's in-memory copy (force). Call after an out-of-process
+	// `git add` so a following in-process status/commit on the same FRepository isn't stale.
+	GITLINKCORE_API auto ReloadIndex    (FRepository& InRepo) -> FResult;
+
 	// --- Commits ---
 	GITLINKCORE_API auto CreateCommit(FRepository& InRepo, const FCommitParams& InParams) -> FResult;
 

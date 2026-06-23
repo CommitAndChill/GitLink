@@ -67,6 +67,9 @@ namespace gitlink::op
 #endif  // WITH_LIBGIT2
 
 	// ----------------------------------------------------------------------------------------------------------------
+	// WARNING: git_index_add_all bypasses Git's clean filter drivers (git-lfs included) — an LFS-tracked path is
+	// staged as RAW bytes, not an LFS pointer. Command code that stages user-committed working-tree content must use
+	// gitlink::cmd::Stage_ViaGit (subprocess `git add`) instead. See GitLink CLAUDE.md v0.4.3.
 	auto StagePaths(FRepository& InRepo, const TArray<FString>& InPaths) -> FResult
 	{
 #if WITH_LIBGIT2
@@ -104,6 +107,38 @@ namespace gitlink::op
 		return FResult::Ok();
 #else
 		return FResult::Fail(TEXT("StagePaths: compiled without libgit2"));
+#endif
+	}
+
+	// ----------------------------------------------------------------------------------------------------------------
+	auto ReloadIndex(FRepository& InRepo) -> FResult
+	{
+#if WITH_LIBGIT2
+		if (!InRepo.IsOpen())
+		{ return FResult::Fail(TEXT("ReloadIndex: repository not open")); }
+
+		FScopeLock Lock(&InRepo.Get_Mutex());
+
+		git_index* RawIndex = nullptr;
+		if (const int32 Rc = git_repository_index(&RawIndex, InRepo.Get_RawHandle()); Rc < 0)
+		{
+			if (RawIndex) { git_index_free(RawIndex); }
+			return libgit2::MakeFailResult(TEXT("ReloadIndex: git_repository_index"), Rc);
+		}
+		libgit2::FIndexPtr Index(RawIndex);
+
+		// force=1 — unconditionally re-read .git/index from disk, discarding the in-memory copy. We pass force
+		// because an out-of-process `git add` (Stage_ViaGit) just rewrote the file, and libgit2's conditional
+		// (mtime/size) refresh can miss a same-second write — the classic racy-index problem, worse on Windows'
+		// coarse mtime. Determinism matters: a stale index means a following in-process Commit writes the wrong tree.
+		if (const int32 Rc = git_index_read(Index.Get(), /*force=*/1); Rc < 0)
+		{
+			return libgit2::MakeFailResult(TEXT("ReloadIndex: git_index_read"), Rc);
+		}
+
+		return FResult::Ok();
+#else
+		return FResult::Fail(TEXT("ReloadIndex: compiled without libgit2"));
 #endif
 	}
 
