@@ -32,8 +32,8 @@ namespace gitlink::cmd
 // --------------------------------------------------------------------------------------------------------------------
 // Cmd_Connect — handles FConnect, Unreal's "is the provider usable?" probe.
 //
-// The repository was already opened in FGitLink_Provider::Init() via CheckRepositoryStatus(),
-// so this handler's job is just to verify a real repo handle exists and report a sensible
+// The repository was opened or refreshed by FGitLink_Provider before the dispatcher snapshotted
+// this command's context, so this handler verifies a real repo handle exists and reports a sensible
 // error otherwise. The UE editor uses the error text in the Connect dialog.
 // --------------------------------------------------------------------------------------------------------------------
 
