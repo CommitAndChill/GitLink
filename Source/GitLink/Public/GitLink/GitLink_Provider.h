@@ -282,8 +282,12 @@ public:
 
 private:
 	// Opens the libgit2 repository at ProjectDir (or the configured override) and caches the
-	// user / branch / remote metadata. Called from Init(true).
+	// user / branch / remote metadata. Called by initial automatic Init and explicit Connect.
 	auto CheckRepositoryStatus() -> void;
+
+	// Explicit Connect is the user-controlled refresh boundary. Refresh before dispatch so the
+	// command context snapshots only the newly published repository resources and metadata.
+	auto Prepare_ForOperation(const FSourceControlOperationRef& InOperation) -> void;
 
 	// Called when the editor saves a package. Re-stages files in the Staged changelist
 	// and requests an immediate background poll so View Changes updates quickly.

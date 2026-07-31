@@ -150,12 +150,13 @@ auto FGitLink_Provider::Init(bool bInForceConnection) -> void
 		bInForceConnection ? TEXT("true") : TEXT("false"),
 		_bGitRepositoryFound ? TEXT("true") : TEXT("false"));
 
-	// bForceConnection controls whether we re-probe when already connected; it does NOT gate
-	// whether we try to connect at all. The editor passes force=false on quiet re-activation
-	// (e.g. when the source control settings dialog reselects the current provider). We still
-	// want to open the repository in that case.
-	if (_bGitRepositoryFound && !bInForceConnection)
+	// Unreal calls Init(false) while selecting the provider and Init(true) again during editor
+	// startup. The force flag does not identify an explicit user reconnect, so once a complete
+	// connection has been published every automatic Init is idempotent. A failed open remains
+	// retryable because CheckRepositoryStatus leaves _bGitRepositoryFound false.
+	if (_bGitRepositoryFound)
 	{
+		UE_LOG(LogGitLink, Log, TEXT("FGitLink_Provider::Init: already connected; skipping repository refresh"));
 		return;
 	}
 
@@ -1075,6 +1076,18 @@ auto FGitLink_Provider::UnregisterSourceControlStateChanged_Handle(FDelegateHand
 // --------------------------------------------------------------------------------------------------------------------
 // Execute
 // --------------------------------------------------------------------------------------------------------------------
+auto FGitLink_Provider::Prepare_ForOperation(const FSourceControlOperationRef& InOperation) -> void
+{
+	if (InOperation->GetName() != TEXT("Connect"))
+	{
+		return;
+	}
+
+	check(IsInGameThread());
+	UE_LOG(LogGitLink, Log, TEXT("FGitLink_Provider::Execute: explicit Connect; refreshing repository"));
+	CheckRepositoryStatus();
+}
+
 #if ENGINE_MAJOR_VERSION < 5
 auto FGitLink_Provider::Execute(
 	const FSourceControlOperationRef& InOperation,
@@ -1082,6 +1095,7 @@ auto FGitLink_Provider::Execute(
 	EConcurrency::Type InConcurrency,
 	const FSourceControlOperationComplete& InOperationCompleteDelegate) -> ECommandResult::Type
 {
+	Prepare_ForOperation(InOperation);
 	return _Dispatcher->Dispatch(InOperation, InFiles, InConcurrency, InOperationCompleteDelegate);
 }
 #else
@@ -1092,6 +1106,7 @@ auto FGitLink_Provider::Execute(
 	EConcurrency::Type InConcurrency,
 	const FSourceControlOperationComplete& InOperationCompleteDelegate) -> ECommandResult::Type
 {
+	Prepare_ForOperation(InOperation);
 	return _Dispatcher->Dispatch(InOperation, InFiles, InConcurrency, InOperationCompleteDelegate, InChangelist);
 }
 #endif
