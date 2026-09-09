@@ -57,6 +57,25 @@ public:
 	auto Get_GitBinary()       const -> const FString& { return _GitBinary; }
 	auto Get_WorkingDirectory() const -> const FString& { return _WorkingDirectory; }
 
+	// Count of process-spawn ATTEMPTS made through this object, incremented before the spawn
+	// regardless of outcome.
+	//
+	// Exists for the tests, and it is not decoration. The whole point of resolving LFS endpoints
+	// through libgit2 is that no `git` process is created; that is a NEGATIVE property, and the
+	// obvious way to assert it — hand the client a git binary that cannot be launched and check
+	// resolution still succeeds — only catches spawns whose FAILURE changes the return value. A
+	// spawn whose result is not load-bearing is invisible: `Run` reports a failed spawn at
+	// Warning, and the automation framework does not fail on warnings unless
+	// `bElevateLogWarningsToErrors` is set (it is not, on any config in this project). So a
+	// regression that reintroduces, say, the `symbolic-ref` probe for a detached HEAD would keep
+	// every such test green. Counting the attempts makes the assertion independent both of
+	// whether a spawn's result matters and of log-verbosity configuration.
+	//
+	// Not atomic: `Run` is called from worker threads, but this counter is only ever read by
+	// single-threaded tests, and making it atomic would imply a thread-safety guarantee about
+	// the count that nothing needs.
+	auto Get_SpawnAttemptCount() const -> int32 { return _SpawnAttempts; }
+
 	// Runs `git <args>` in the configured working directory. Each element of InArgs is
 	// quoted individually so paths with spaces survive.
 	//
@@ -152,4 +171,5 @@ public:
 private:
 	FString _GitBinary;
 	FString _WorkingDirectory;
+	int32   _SpawnAttempts = 0;   // see Get_SpawnAttemptCount
 };
