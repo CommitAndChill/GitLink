@@ -20,10 +20,20 @@
 // the automatic FConnect refreshes the status again. Process creation, not git, was the cost.
 //
 // The fix reads those three facts through the libgit2 handle the submodule walk already opens. The
-// load-bearing property is NEGATIVE — "no process was spawned" — so the tests below assert it the
-// only way that cannot silently rot: they hand the client a git binary that CANNOT run. Anything
-// that reintroduces a spawn on the facts path fails these tests instead of quietly costing 2.9 s
-// again.
+// load-bearing property is NEGATIVE — "no process was spawned" — and these tests assert it TWO
+// ways, because the obvious one is not sufficient:
+//
+//   1. The client is handed a git binary that CANNOT be launched, so any spawn whose result is
+//      load-bearing changes the return value and fails the test.
+//   2. `FGitLink_Subprocess::Get_SpawnAttemptCount()` is asserted directly.
+//
+// (2) exists because (1) alone has a hole, found in review: a spawn whose result is NOT
+// load-bearing is invisible. `Run` reports a failed spawn at Warning, and the automation framework
+// does not fail on warnings unless `bElevateLogWarningsToErrors` is set — which no config in this
+// project sets. So deleting `&& !InFacts.bHeadRefKnown` from the ref block would restore one
+// `symbolic-ref` spawn per detached submodule per pass (~1.2 s/boot here) and every arm below
+// would still have passed. The counter makes the assertion independent both of whether a spawn's
+// result matters and of log-verbosity configuration.
 //
 // Companion ops tested here too (gitlink::op::Get_ConfigString / Get_HeadSymbolicRefName), since a
 // wrong value there would send resolution down the subprocess fallback and the perf win would
@@ -34,7 +44,7 @@
 
 namespace gitlink::op
 {
-	auto Get_ConfigString(gitlink::FRepository& InRepo, const FString& InKey) -> FString;
+	auto Get_ConfigString(gitlink::FRepository& InRepo, const FString& InKey) -> TOptional<FString>;
 	auto Get_HeadSymbolicRefName(gitlink::FRepository& InRepo) -> FString;
 }
 
@@ -79,6 +89,7 @@ bool FGitLinkTests_LfsEndpoint_FactsPathNeedsNoSubprocess::RunTest(const FString
 	TestTrue(TEXT("resolved from supplied facts"),
 		Client.Resolve_LfsUrlForRepo(Root, Make_FullFacts()));
 	TestTrue(TEXT("endpoint cached for the root"), Client.Has_LfsUrl(Root));
+	TestEqual(TEXT("spawned no processes"), Subprocess.Get_SpawnAttemptCount(), 0);
 	return true;
 }
 
@@ -94,6 +105,15 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FGitLinkTests_LfsEndpoint_NoFactsFallsBackToSubprocess::RunTest(const FString& /*Parameters*/)
 {
+	// Declared, with an exact occurrence count. Two reasons, both from review:
+	//   - an undeclared Warning makes this test "success with warnings" today and RED under any CI
+	//     config that elevates warnings (the sibling Test_Subprocess_RunToFile.cpp declares its own
+	//     expected Warning for exactly this reason);
+	//   - the count turns the control arm into a real measurement. Without it, this test keeps
+	//     passing if the no-facts path silently stopped probing `remote.origin.url`.
+	AddExpectedMessagePlain(TEXT("Subprocess: failed to spawn"), ELogVerbosity::Warning,
+		EAutomationExpectedMessageFlags::Contains, 2);
+
 	FGitLink_Subprocess    Subprocess{k_UnrunnableGitBinary, FPaths::ProjectDir()};
 	FGitLink_LfsHttpClient Client{Subprocess};
 
@@ -102,6 +122,8 @@ bool FGitLinkTests_LfsEndpoint_NoFactsFallsBackToSubprocess::RunTest(const FStri
 	TestFalse(TEXT("cannot resolve without facts when git will not run"),
 		Client.Resolve_LfsUrlForRepo(Root));
 	TestFalse(TEXT("nothing cached"), Client.Has_LfsUrl(Root));
+	TestEqual(TEXT("probed exactly twice: lfs.url then remote.origin.url"),
+		Subprocess.Get_SpawnAttemptCount(), 2);
 	return true;
 }
 
@@ -125,6 +147,7 @@ bool FGitLinkTests_LfsEndpoint_ExplicitLfsUrlWins::RunTest(const FString& /*Para
 
 	TestTrue(TEXT("resolved from explicit lfs.url"), Client.Resolve_LfsUrlForRepo(Root, Facts));
 	TestTrue(TEXT("endpoint cached"), Client.Has_LfsUrl(Root));
+	TestEqual(TEXT("spawned no processes"), Subprocess.Get_SpawnAttemptCount(), 0);
 	return true;
 }
 
@@ -151,6 +174,40 @@ bool FGitLinkTests_LfsEndpoint_KnownEmptyConfigDoesNotProbe::RunTest(const FStri
 
 	TestFalse(TEXT("no endpoint without a remote"), Client.Resolve_LfsUrlForRepo(Root, Facts));
 	TestFalse(TEXT("nothing cached"), Client.Has_LfsUrl(Root));
+	TestEqual(TEXT("did not probe a config it was told is empty"),
+		Subprocess.Get_SpawnAttemptCount(), 0);
+	return true;
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+// 4b. A DETACHED HEAD must resolve without probing. This is the arm the suite was missing, and it
+//     covers most of the win: the majority of submodules in a submodule-heavy checkout sit
+//     detached, so `bHeadRefKnown` with an empty ref is the common case, not an edge case.
+//     Without this arm, deleting `&& !InFacts.bHeadRefKnown` from the ref block reintroduces one
+//     `symbolic-ref` spawn per detached submodule per pass and every other test stays green.
+// --------------------------------------------------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FGitLinkTests_LfsEndpoint_DetachedHeadDoesNotProbe,
+	"GitLink.LfsEndpoint.DetachedHeadDoesNotProbe",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FGitLinkTests_LfsEndpoint_DetachedHeadDoesNotProbe::RunTest(const FString& /*Parameters*/)
+{
+	FGitLink_Subprocess    Subprocess{k_UnrunnableGitBinary, FPaths::ProjectDir()};
+	FGitLink_LfsHttpClient Client{Subprocess};
+
+	FGitLink_LfsHttpClient::FRepoFacts Facts;
+	Facts.RemoteOriginUrl  = TEXT("https://github.com/chainkemists/CkTests.git");
+	Facts.bConfigKnown     = true;
+	Facts.HeadRefName      = FString();   // detached: a legitimately empty answer
+	Facts.bHeadRefKnown    = true;
+
+	const FString Root = TEXT("D:/Repos/BusterBlock/Plugins/CkTests/");
+
+	TestTrue(TEXT("resolves with a detached HEAD"), Client.Resolve_LfsUrlForRepo(Root, Facts));
+	TestTrue(TEXT("endpoint cached"), Client.Has_LfsUrl(Root));
+	TestEqual(TEXT("did not probe symbolic-ref for a known-detached HEAD"),
+		Subprocess.Get_SpawnAttemptCount(), 0);
 	return true;
 }
 
@@ -179,16 +236,20 @@ bool FGitLinkTests_LfsEndpoint_ConfigAndHeadRefReads::RunTest(const FString& /*P
 	}
 
 	// FTempRepo seeds user.name / user.email, so this proves the merged config chain is readable.
-	TestFalse(TEXT("a set key reads back non-empty"),
-		gitlink::op::Get_ConfigString(*Open, TEXT("user.name")).IsEmpty());
+	const auto UserName = gitlink::op::Get_ConfigString(*Open, TEXT("user.name"));
+	TestTrue(TEXT("a set key was readable"), UserName.IsSet());
+	TestFalse(TEXT("a set key reads back non-empty"), UserName.Get(FString{}).IsEmpty());
 
-	// The quiet-empty contract: `git config --get lfs.url` exits 1 on a repo without one, and this
-	// must be an empty string rather than a warning or a garbage value. GitLink v0.3.7 demoted the
-	// subprocess equivalent to Verbose for the same reason.
-	TestTrue(TEXT("an unset key reads back empty"),
-		gitlink::op::Get_ConfigString(*Open, TEXT("lfs.url")).IsEmpty());
-	TestTrue(TEXT("an unset remote reads back empty"),
-		gitlink::op::Get_ConfigString(*Open, TEXT("remote.origin.url")).IsEmpty());
+	// The unset contract: SET-but-empty, i.e. "the config was read and there is no value" —
+	// distinct from an unset TOptional, which means "could not consult the config" and is what
+	// makes the caller fall back to the subprocess instead of caching "no LFS endpoint".
+	//
+	// Deliberately NOT `lfs.url` or `remote.origin.url`: this reads the MERGED chain, so a
+	// developer with either configured globally (a corporate LFS mirror, say) would fail an
+	// assertion about a temp repo. A namespaced key nobody can have set is the portable probe.
+	const auto Unset = gitlink::op::Get_ConfigString(*Open, TEXT("gitlinktests.definitelyunset"));
+	TestTrue(TEXT("an unset key was still READ (set TOptional)"), Unset.IsSet());
+	TestTrue(TEXT("an unset key reads back empty"), Unset.Get(TEXT("sentinel")).IsEmpty());
 
 	// A freshly initialised repo has HEAD as a SYMBOLIC ref to its unborn default branch. The LFS
 	// `ref` field wants the full name, which is what `git symbolic-ref HEAD` prints — not the short

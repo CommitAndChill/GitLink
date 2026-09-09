@@ -22,13 +22,23 @@
 
 namespace gitlink::op
 {
-    auto Get_ConfigString(FRepository& InRepo, const FString& InKey) -> FString
+    auto Get_ConfigString(FRepository& InRepo, const FString& InKey) -> TOptional<FString>
     {
-        FString Out;
-
+        // Unset TOptional  = could not consult the config at all (repo not open, config chain
+        //                    failed to open, or a non-ENOTFOUND libgit2 error).
+        // Set-and-empty    = the config was read and the key is genuinely unset.
+        // Set-and-nonempty = the value.
+        //
+        // The distinction is load-bearing, not tidiness: the caller sets `bConfigKnown` from it,
+        // and `bConfigKnown` suppresses the subprocess fallback. Collapsing "I could not read"
+        // into "there is no value" would cache "this repo has no LFS endpoint" for the whole
+        // session off the back of a transient libgit2 failure, silently disabling the HTTP lock
+        // path for that repo. Returning FString() for both -- which this function did when first
+        // written -- is exactly the hole the b*Known flags were introduced to close, reopened one
+        // layer down.
 #if WITH_LIBGIT2
         if (!InRepo.IsOpen() || InKey.IsEmpty())
-        { return Out; }
+        { return {}; }
 
         FScopeLock Lock(&InRepo.Get_Mutex());
 
@@ -42,31 +52,40 @@ namespace gitlink::op
             if (RawConfig) { git_config_free(RawConfig); }
             UE_LOG(LogGitLinkCore, Verbose, TEXT("Get_ConfigString('%s'): git_repository_config failed: %s"),
                 *InKey, *libgit2::Get_LastErrorMessage());
-            return Out;
+            return {};
         }
 
         // No RAII wrapper exists for git_config in FGitLink_Libgit2_Handles.h and adding one for a
         // single call site would be noise; the two exits below are the only paths out.
+        auto Out = TOptional<FString>{};
+
         git_buf Value = {nullptr, 0, 0};
         const int32 GetRc = git_config_get_string_buf(&Value, RawConfig, TCHAR_TO_UTF8(*InKey));
         if (GetRc == 0 && Value.ptr != nullptr)
         {
             Out = FString(UTF8_TO_TCHAR(Value.ptr));
         }
-        else if (GetRc != GIT_ENOTFOUND)
+        else if (GetRc == GIT_ENOTFOUND)
         {
-            // GIT_ENOTFOUND is the normal answer for an unset key (`git config --get` exits 1) and
-            // must stay quiet — see GitLink v0.3.7, which demoted exactly this case to Verbose on
-            // the subprocess path. Anything else is a real failure worth naming.
+            // Read succeeded; the key simply is not set. That IS an answer.
+            Out = FString{};
+        }
+        else
+        {
+            // A real failure. Left unset so the caller falls back to the subprocess rather than
+            // caching "no value". (GIT_ENOTFOUND is handled above and stays quiet — see GitLink
+            // v0.3.7, which demoted exactly that case to Verbose on the subprocess path.)
             UE_LOG(LogGitLinkCore, Verbose, TEXT("Get_ConfigString('%s'): git_config_get_string_buf failed: %s"),
                 *InKey, *libgit2::Get_LastErrorMessage());
         }
 
         git_buf_dispose(&Value);
         git_config_free(RawConfig);
-#endif  // WITH_LIBGIT2
 
         return Out;
+#else
+        return {};
+#endif  // WITH_LIBGIT2
     }
 
     auto Get_HeadSymbolicRefName(FRepository& InRepo) -> FString

@@ -60,9 +60,12 @@ namespace gitlink::op
 
 	// --- Config / ref reads ---
 	// `git config --get <key>` without the process spawn: reads the repository's merged config
-	// chain (system -> global -> local). Returns empty when the key is unset, which is the normal
-	// case for e.g. `lfs.url` and is NOT logged as a failure.
-	GITLINKCORE_API auto Get_ConfigString(FRepository& InRepo, const FString& InKey) -> FString;
+	// chain (system -> global -> local).
+	//
+	// Unset TOptional = the config could not be consulted. Set-and-empty = read fine, key unset
+	// (the normal case for e.g. `lfs.url`, and NOT logged as a failure). The caller must not
+	// conflate them: "could not read" has to fall back, "no value" does not.
+	GITLINKCORE_API auto Get_ConfigString(FRepository& InRepo, const FString& InKey) -> TOptional<FString>;
 
 	// `git symbolic-ref --quiet HEAD` without the process spawn: the FULL ref name HEAD points at
 	// (e.g. "refs/heads/dev"), or empty on a detached HEAD. Distinct from

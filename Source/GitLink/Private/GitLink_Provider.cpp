@@ -34,7 +34,7 @@ namespace gitlink::op
 	auto Get_DefaultSignature(gitlink::FRepository& InRepo) -> gitlink::FSignature;
 	auto Enumerate_SubmodulePaths(gitlink::FRepository& InRepo) -> TArray<FString>;
 	auto Enumerate_TrackedFiles(gitlink::FRepository& InRepo) -> TArray<FString>;
-	auto Get_ConfigString(gitlink::FRepository& InRepo, const FString& InKey) -> FString;
+	auto Get_ConfigString(gitlink::FRepository& InRepo, const FString& InKey) -> TOptional<FString>;
 	auto Get_HeadSymbolicRefName(gitlink::FRepository& InRepo) -> FString;
 }
 
@@ -242,6 +242,32 @@ auto FGitLink_Provider::Close() -> void
 	{ _StateCache->Clear(); }
 }
 
+// --------------------------------------------------------------------------------------------------------------------
+// Package -> on-disk file path, for the three editor delegates that feed
+// Request_LockRefreshForFile.
+//
+// NOT FPackageName::TryConvertLongPackageNameToFilename with GetAssetPackageExtension(): that
+// hardcodes `.uasset`, so a `.umap` package derived `<...>/Foo.uasset` -- a path that does not
+// exist. Before the FileExists precondition below that meant one wasted lock request per map;
+// after it the probe is skipped entirely, so the single-file lock path silently never worked for
+// maps, which are among the most-locked assets in the project. GetLoadedPath() carries the real
+// extension the package was loaded from.
+//
+// Returns empty for a package with no file behind it at all -- `/Script/*` and never-saved
+// packages -- which is exactly the class that produced
+// `GET .../locks?path=Script%2FAngelscript.uasset` twice per boot. Callers skip on empty.
+static auto GitLink_PackageFileOnDisk(const UPackage* InPackage) -> FString
+{
+	if (InPackage == nullptr)
+	{ return FString(); }
+
+	const FString Local = InPackage->GetLoadedPath().GetLocalFullPath();
+	if (Local.IsEmpty())
+	{ return FString(); }
+
+	return FPaths::ConvertRelativePathToFull(Local);
+}
+
 auto FGitLink_Provider::CheckRepositoryStatus() -> void
 {
 	// Invalidate the published metadata first — worker-thread readers see "not connected"
@@ -379,12 +405,19 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		const auto Harvest_LfsFacts = [](gitlink::FRepository& InRepo) -> FGitLink_LfsHttpClient::FRepoFacts
 		{
 			FGitLink_LfsHttpClient::FRepoFacts Facts;
-			// Both flags are set unconditionally: these reads are authoritative even when they
-			// come back empty (lfs.url unset, detached HEAD). Leaving a flag false would send the
-			// resolver back to a subprocess to re-learn what we just read.
-			Facts.ConfiguredLfsUrl = gitlink::op::Get_ConfigString(InRepo, TEXT("lfs.url"));
-			Facts.RemoteOriginUrl  = gitlink::op::Get_ConfigString(InRepo, TEXT("remote.origin.url"));
-			Facts.bConfigKnown     = true;
+			// An empty read is authoritative; an UNREADABLE one is not. `Get_ConfigString`
+			// distinguishes them (unset TOptional = could not consult the config), and
+			// bConfigKnown is only set when BOTH reads actually answered -- otherwise the
+			// resolver must fall back to the subprocess instead of caching "this repo has no
+			// LFS endpoint" for the session off a transient libgit2 failure.
+			const auto LfsUrlOpt = gitlink::op::Get_ConfigString(InRepo, TEXT("lfs.url"));
+			const auto RemoteOpt = gitlink::op::Get_ConfigString(InRepo, TEXT("remote.origin.url"));
+			Facts.ConfiguredLfsUrl = LfsUrlOpt.Get(FString{});
+			Facts.RemoteOriginUrl  = RemoteOpt.Get(FString{});
+			Facts.bConfigKnown     = LfsUrlOpt.IsSet() && RemoteOpt.IsSet();
+
+			// The ref read has no such failure mode to distinguish: detached HEAD and
+			// "HEAD is unreadable" both correctly mean "omit the optional `ref` field".
 			Facts.HeadRefName      = gitlink::op::Get_HeadSymbolicRefName(InRepo);
 			Facts.bHeadRefKnown    = true;
 			return Facts;
@@ -582,9 +615,8 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 					if (Asset == nullptr) { continue; }
 					UPackage* Pkg = Asset->GetOutermost();
 					if (Pkg == nullptr) { continue; }
-					FString PackageFilename;
-					if (!FPackageName::TryConvertLongPackageNameToFilename(
-							Pkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+					const FString PackageFilename = GitLink_PackageFileOnDisk(Pkg);
+					if (PackageFilename.IsEmpty())
 					{ continue; }
 					Request_LockRefreshForFile(PackageFilename);
 					if (++Issued >= kMaxBatchOnActivate) { break; }
@@ -610,9 +642,8 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 					if (InAsset == nullptr) { return; }
 					UPackage* Pkg = InAsset->GetOutermost();
 					if (Pkg == nullptr) { return; }
-					FString PackageFilename;
-					if (!FPackageName::TryConvertLongPackageNameToFilename(
-							Pkg->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+					const FString PackageFilename = GitLink_PackageFileOnDisk(Pkg);
+					if (PackageFilename.IsEmpty())
 					{ return; }
 					Request_LockRefreshForFile(PackageFilename);
 				});
@@ -628,9 +659,8 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		[this](UPackage* InPackage, bool /*bInWasDirty*/)
 		{
 			if (InPackage == nullptr) { return; }
-			FString PackageFilename;
-			if (!FPackageName::TryConvertLongPackageNameToFilename(
-					InPackage->GetName(), PackageFilename, FPackageName::GetAssetPackageExtension()))
+			const FString PackageFilename = GitLink_PackageFileOnDisk(InPackage);
+			if (PackageFilename.IsEmpty())
 			{ return; }
 			Request_LockRefreshForFile(PackageFilename);
 		});

@@ -116,6 +116,9 @@ auto FGitLink_Subprocess::Run(const TArray<FString>& InArgs, const FString& InCw
 	FString StdOut;
 	FString StdErr;
 
+	// Before the spawn, not after, and regardless of outcome — see Get_SpawnAttemptCount.
+	++_SpawnAttempts;
+
 	const bool bSpawned = FPlatformProcess::ExecProcess(
 		*_GitBinary,
 		*ArgsStr,
