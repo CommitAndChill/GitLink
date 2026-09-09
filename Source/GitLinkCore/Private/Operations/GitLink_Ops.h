@@ -58,6 +58,17 @@ namespace gitlink::op
 	// default-constructed FSignature on error (empty Name/Email).
 	GITLINKCORE_API auto Get_DefaultSignature(FRepository& InRepo) -> FSignature;
 
+	// --- Config / ref reads ---
+	// `git config --get <key>` without the process spawn: reads the repository's merged config
+	// chain (system -> global -> local). Returns empty when the key is unset, which is the normal
+	// case for e.g. `lfs.url` and is NOT logged as a failure.
+	GITLINKCORE_API auto Get_ConfigString(FRepository& InRepo, const FString& InKey) -> FString;
+
+	// `git symbolic-ref --quiet HEAD` without the process spawn: the FULL ref name HEAD points at
+	// (e.g. "refs/heads/dev"), or empty on a detached HEAD. Distinct from
+	// FRepository::Get_CurrentBranchName, which returns the SHORT name ("dev").
+	GITLINKCORE_API auto Get_HeadSymbolicRefName(FRepository& InRepo) -> FString;
+
 	// --- Blob queries ---
 	// Returns the raw byte size of the blob at InRepoRelativePath in the commit InCommitHash.
 	// Returns 0 when the path doesn't exist in that commit or the commit can't be resolved.
