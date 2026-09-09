@@ -86,10 +86,40 @@ public:
 	FGitLink_LfsHttpClient(const FGitLink_LfsHttpClient&)            = delete;
 	FGitLink_LfsHttpClient& operator=(const FGitLink_LfsHttpClient&) = delete;
 
+	// The three repository facts endpoint resolution needs. Supplying them lets the caller read
+	// them from an already-open libgit2 handle instead of paying three `git` process spawns per
+	// repo — the difference between ~2.9 s and nothing measurable across BusterBlock's parent
+	// repo plus 31 submodules, on the game thread, at connect.
+	//
+	// Field semantics match the subprocess commands they replace exactly. The two b*Known flags
+	// carry what an empty string cannot: whether the caller ACTUALLY LOOKED. "unset lfs.url" and
+	// "detached HEAD" are both legitimately empty answers, and without the flags every such repo
+	// would be re-probed by subprocess — which in a submodule-heavy tree is most of them.
+	// A default-constructed FRepoFacts therefore means "know nothing", and reproduces the
+	// original all-subprocess discovery exactly.
+	struct FRepoFacts
+	{
+		FString ConfiguredLfsUrl;       // `git config --get lfs.url`            — usually unset
+		FString RemoteOriginUrl;        // `git config --get remote.origin.url`
+		bool    bConfigKnown  = false;  // true once BOTH config fields are authoritative
+
+		FString HeadRefName;            // `git symbolic-ref --quiet HEAD`       — empty if detached
+		bool    bHeadRefKnown = false;  // true once HeadRefName is authoritative, empty or not
+	};
+
 	// Resolves and caches the LFS endpoint URL for a repo root. Runs at connect time so the
 	// poll path doesn't need to shell out. Tries `git -C <root> config --get lfs.url`, then
 	// falls back to deriving from `remote.origin.url`. Returns true if a usable URL was found.
+	//
+	// Prefer the FRepoFacts overload wherever an open repository handle is at hand; this one
+	// discovers all three facts by process spawn and is the fallback for roots libgit2 could not
+	// open (e.g. an uninitialised submodule).
 	auto Resolve_LfsUrlForRepo(const FString& InRepoRoot) -> bool;
+
+	// Same resolution, with facts the caller already knows. Each b*Known group left false falls
+	// back to the subprocess probe for that group alone, so this is never less capable than the
+	// discovering overload — only cheaper.
+	auto Resolve_LfsUrlForRepo(const FString& InRepoRoot, const FRepoFacts& InFacts) -> bool;
 
 	// True iff Resolve_LfsUrlForRepo has cached a usable URL for this repo.
 	auto Has_LfsUrl(const FString& InRepoRoot) const -> bool;

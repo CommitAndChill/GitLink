@@ -34,6 +34,8 @@ namespace gitlink::op
 	auto Get_DefaultSignature(gitlink::FRepository& InRepo) -> gitlink::FSignature;
 	auto Enumerate_SubmodulePaths(gitlink::FRepository& InRepo) -> TArray<FString>;
 	auto Enumerate_TrackedFiles(gitlink::FRepository& InRepo) -> TArray<FString>;
+	auto Get_ConfigString(gitlink::FRepository& InRepo, const FString& InKey) -> FString;
+	auto Get_HeadSymbolicRefName(gitlink::FRepository& InRepo) -> FString;
 }
 
 #include <Misc/Paths.h>
@@ -363,6 +365,34 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		// GetOrCreate_FileState is called before GetState() has had a chance to annotate.
 		_StateCache->Set_SubmodulePaths(Snap.SubmodulePaths);
 
+		// LFS endpoint resolution needs three git-config facts per repo, and this loop already
+		// holds an open libgit2 handle for every submodule. Harvest them here rather than letting
+		// Resolve_LfsUrlForRepo spawn `git config` x2 + `git symbolic-ref` per repo: that was
+		// 96 serial process spawns (~2.9 s measured) of blocked game-thread time per connect on
+		// BusterBlock's 31 submodules, paid twice per editor boot. A root this loop cannot open
+		// gets no entry, and the resolver falls back to its subprocess probe for that root alone.
+		TMap<FString, FGitLink_LfsHttpClient::FRepoFacts> LfsFactsByRoot;
+		const bool bHarvestLfsFacts = _bLfsAvailable && _LfsHttpClient.IsValid();
+		if (bHarvestLfsFacts)
+		{ LfsFactsByRoot.Reserve(Snap.SubmodulePaths.Num() + 1); }
+
+		const auto Harvest_LfsFacts = [](gitlink::FRepository& InRepo) -> FGitLink_LfsHttpClient::FRepoFacts
+		{
+			FGitLink_LfsHttpClient::FRepoFacts Facts;
+			// Both flags are set unconditionally: these reads are authoritative even when they
+			// come back empty (lfs.url unset, detached HEAD). Leaving a flag false would send the
+			// resolver back to a subprocess to re-learn what we just read.
+			Facts.ConfiguredLfsUrl = gitlink::op::Get_ConfigString(InRepo, TEXT("lfs.url"));
+			Facts.RemoteOriginUrl  = gitlink::op::Get_ConfigString(InRepo, TEXT("remote.origin.url"));
+			Facts.bConfigKnown     = true;
+			Facts.HeadRefName      = gitlink::op::Get_HeadSymbolicRefName(InRepo);
+			Facts.bHeadRefKnown    = true;
+			return Facts;
+		};
+
+		if (bHarvestLfsFacts && _Repository.IsValid())
+		{ LfsFactsByRoot.Add(Snap.PathToRepositoryRoot, Harvest_LfsFacts(*_Repository)); }
+
 		// Enumerate each submodule's tracked-files index. Used by GetState to distinguish
 		// "tracked submodule file the parent's status walk can't see" (default to Unmodified)
 		// from "untracked file in a submodule" (must default to NotInRepo so CanCheckout
@@ -394,6 +424,9 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 			for (const FString& RelPath : SubTracked)
 			{ SetRef.Add(RelPath.ToLower()); }
 			TotalSubmoduleTracked += SubTracked.Num();
+
+			if (bHarvestLfsFacts)
+			{ LfsFactsByRoot.Add(SubRoot, Harvest_LfsFacts(*SubRepo)); }
 		}
 
 		UE_LOG(LogGitLink, Log,
@@ -435,18 +468,32 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		// for those repos at poll time.
 		if (_bLfsAvailable && _LfsHttpClient.IsValid())
 		{
-			int32 ResolvedCount = 0;
-			if (_LfsHttpClient->Resolve_LfsUrlForRepo(Snap.PathToRepositoryRoot))
-			{ ++ResolvedCount; }
-			for (const FString& SubRoot : Snap.LfsSubmodulePaths)
+			// Facts harvested above from the open handles; a root missing from the map (libgit2
+			// could not open it) resolves through the subprocess probe as before.
+			int32 ResolvedCount   = 0;
+			int32 SubprocessCount = 0;
+			const auto Resolve_One = [&](const FString& InRoot)
 			{
-				if (_LfsHttpClient->Resolve_LfsUrlForRepo(SubRoot))
+				if (const FGitLink_LfsHttpClient::FRepoFacts* Facts = LfsFactsByRoot.Find(InRoot))
+				{
+					if (_LfsHttpClient->Resolve_LfsUrlForRepo(InRoot, *Facts))
+					{ ++ResolvedCount; }
+					return;
+				}
+
+				++SubprocessCount;
+				if (_LfsHttpClient->Resolve_LfsUrlForRepo(InRoot))
 				{ ++ResolvedCount; }
-			}
+			};
+
+			Resolve_One(Snap.PathToRepositoryRoot);
+			for (const FString& SubRoot : Snap.LfsSubmodulePaths)
+			{ Resolve_One(SubRoot); }
 
 			UE_LOG(LogGitLink, Log,
-				TEXT("CheckRepositoryStatus: LFS HTTP client resolved %d/%d LFS endpoint(s)"),
-				ResolvedCount, 1 + Snap.LfsSubmodulePaths.Num());
+				TEXT("CheckRepositoryStatus: LFS HTTP client resolved %d/%d LFS endpoint(s) ")
+				TEXT("(%d via subprocess fallback)"),
+				ResolvedCount, 1 + Snap.LfsSubmodulePaths.Num(), SubprocessCount);
 		}
 	}
 
@@ -776,6 +823,30 @@ auto FGitLink_Provider::Request_LockRefreshForFile(const FString& InAbsolutePath
 
 	if (!Snapshot_IsFileLockable(Snap.Get(), Normalized))
 	{ return; }
+
+	// An LFS lock is a claim on a file in the WORKING TREE, so a path with nothing on disk
+	// cannot be locked and must never reach the server. The three delegates that feed this
+	// function derive the path with TryConvertLongPackageNameToFilename, which happily
+	// succeeds for packages that have no file at all: `/Script/Angelscript` (the AngelScript
+	// module's script package, marked dirty during compile / CDO re-init) converts to
+	// `<ProjectDir>/Script/Angelscript.uasset` — inside the repo root, `.uasset` extension,
+	// not in a submodule, so it cleared every other guard and BusterBlock issued
+	// `GET .../locks?path=Script%2FAngelscript.uasset` twice per editor boot, each ending in
+	// a 10 s `LogHttp: Warning: HTTP request timed out` (observed 2026-09-08). Two wasted
+	// GitHub round-trips, two of eight bounded workers parked for 10 s, and a scary warning
+	// in every boot log.
+	//
+	// Checked here, at the choke point every present and future caller passes through, rather
+	// than in each of the three delegates — this is the precondition of the operation, not a
+	// quirk of one caller. Ordered AFTER the pure-string lockable test on purpose: this is the
+	// only filesystem stat in the function, and a non-lockable path must not pay for it.
+	if (!FPaths::FileExists(Normalized))
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("Request_LockRefreshForFile: '%s' has no file on disk — nothing to lock, skipping probe"),
+			*Normalized);
+		return;
+	}
 
 	// Submodule files: only probe tracked entries. Untracked-in-submodule = the file isn't in
 	// HEAD yet, so a server-side lock is meaningless and the f345260 "auto-lock-on-create"

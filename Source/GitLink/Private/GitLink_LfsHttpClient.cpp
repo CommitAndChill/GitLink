@@ -274,11 +274,19 @@ FGitLink_LfsHttpClient::FGitLink_LfsHttpClient(FGitLink_Subprocess& InSubprocess
 
 auto FGitLink_LfsHttpClient::Resolve_LfsUrlForRepo(const FString& InRepoRoot) -> bool
 {
+	// Discover nothing up front — the facts overload probes per field, so an all-empty fact set
+	// reproduces the original all-subprocess behaviour exactly.
+	return Resolve_LfsUrlForRepo(InRepoRoot, FRepoFacts{});
+}
+
+auto FGitLink_LfsHttpClient::Resolve_LfsUrlForRepo(const FString& InRepoRoot, const FRepoFacts& InFacts) -> bool
+{
 	if (InRepoRoot.IsEmpty() || !_Subprocess.IsValid())
 	{ return false; }
 
 	// 1) Prefer `git config --get lfs.url` — explicit configuration trumps derivation.
-	FString LfsUrl;
+	FString LfsUrl = InFacts.ConfiguredLfsUrl.TrimStartAndEnd();
+	if (!InFacts.bConfigKnown)
 	{
 		const FGitLink_SubprocessResult Cfg = _Subprocess.Run(
 			{ TEXT("config"), TEXT("--get"), TEXT("lfs.url") },
@@ -292,10 +300,16 @@ auto FGitLink_LfsHttpClient::Resolve_LfsUrlForRepo(const FString& InRepoRoot) ->
 	// 2) Fall back to <remote.origin.url>/info/lfs.
 	if (LfsUrl.IsEmpty())
 	{
-		const FGitLink_SubprocessResult Remote = _Subprocess.Run(
-			{ TEXT("config"), TEXT("--get"), TEXT("remote.origin.url") },
-			InRepoRoot);
-		if (!Remote.IsSuccess())
+		FString RemoteUrl = InFacts.RemoteOriginUrl.TrimStartAndEnd();
+		if (!InFacts.bConfigKnown)
+		{
+			const FGitLink_SubprocessResult Remote = _Subprocess.Run(
+				{ TEXT("config"), TEXT("--get"), TEXT("remote.origin.url") },
+				InRepoRoot);
+			RemoteUrl = Remote.IsSuccess() ? Remote.StdOut.TrimStartAndEnd() : FString();
+		}
+
+		if (RemoteUrl.IsEmpty())
 		{
 			UE_LOG(LogGitLink, Verbose,
 				TEXT("LfsHttpClient: no lfs.url and no remote.origin.url for '%s' — skipping HTTP path"),
@@ -303,7 +317,6 @@ auto FGitLink_LfsHttpClient::Resolve_LfsUrlForRepo(const FString& InRepoRoot) ->
 			return false;
 		}
 
-		FString RemoteUrl = Remote.StdOut.TrimStartAndEnd();
 		if (RemoteUrl.StartsWith(TEXT("git@")) || RemoteUrl.StartsWith(TEXT("ssh://")))
 		{
 			RemoteUrl = gitlink::lfs_http::detail::Convert_SshRemoteToHttps(RemoteUrl);
@@ -330,7 +343,12 @@ auto FGitLink_LfsHttpClient::Resolve_LfsUrlForRepo(const FString& InRepoRoot) ->
 
 	// Best-effort current branch name. Empty is acceptable; the LFS spec marks `ref` optional
 	// on /locks/verify, and most servers (including GitHub) accept the omission.
-	FString RefName;
+	//
+	// bHeadRefKnown, not "is it empty": a detached HEAD legitimately resolves to an empty ref, and
+	// treating that as "unknown" would spawn a subprocess on every connect for every detached
+	// submodule — which is most of them in a submodule-heavy tree.
+	FString RefName = InFacts.HeadRefName.TrimStartAndEnd();
+	if (RefName.IsEmpty() && !InFacts.bHeadRefKnown)
 	{
 		const FGitLink_SubprocessResult Branch = _Subprocess.Run(
 			{ TEXT("symbolic-ref"), TEXT("--quiet"), TEXT("HEAD") },
