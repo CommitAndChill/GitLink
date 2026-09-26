@@ -195,7 +195,7 @@ auto FGitLink_Provider::Close() -> void
 		_PackageSavedHandle.Reset();
 	}
 
-	// Stage B — unwire single-file LFS lock refresh signals.
+	// Unwire single-file LFS lock refresh signals.
 	if (_AppActivationHandle.IsValid() && FSlateApplication::IsInitialized())
 	{
 		FSlateApplication::Get().OnApplicationActivationStateChanged().Remove(_AppActivationHandle);
@@ -395,7 +395,7 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		// holds an open libgit2 handle for every submodule. Harvest them here rather than letting
 		// Resolve_LfsUrlForRepo spawn `git config` x2 + `git symbolic-ref` per repo: that was
 		// 96 serial process spawns (~2.9 s measured) of blocked game-thread time per connect on
-		// BusterBlock's 31 submodules, paid twice per editor boot. A root this loop cannot open
+		// a project with 31 submodules, paid twice per editor boot. A root this loop cannot open
 		// gets no entry, and the resolver falls back to its subprocess probe for that root alone.
 		TMap<FString, FGitLink_LfsHttpClient::FRepoFacts> LfsFactsByRoot;
 		const bool bHarvestLfsFacts = _bLfsAvailable && _LfsHttpClient.IsValid();
@@ -588,7 +588,7 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 		});
 #endif
 
-	// Stage B — single-file LFS lock refresh signals. Wire three orthogonal triggers and
+	// Single-file LFS lock refresh signals. Wire three orthogonal triggers and
 	// route them through Request_LockRefreshForFile, which debounces and runs the HTTP probe
 	// off the game thread. Each handle is rebound here on re-init; Close() unbinds them.
 
@@ -860,7 +860,7 @@ auto FGitLink_Provider::Request_LockRefreshForFile(const FString& InAbsolutePath
 	// succeeds for packages that have no file at all: `/Script/Angelscript` (the AngelScript
 	// module's script package, marked dirty during compile / CDO re-init) converts to
 	// `<ProjectDir>/Script/Angelscript.uasset` — inside the repo root, `.uasset` extension,
-	// not in a submodule, so it cleared every other guard and BusterBlock issued
+	// not in a submodule, so it cleared every other guard and a production project issued
 	// `GET .../locks?path=Script%2FAngelscript.uasset` twice per editor boot, each ending in
 	// a 10 s `LogHttp: Warning: HTTP request timed out` (observed 2026-09-08). Two wasted
 	// GitHub round-trips, two of eight bounded workers parked for 10 s, and a scary warning

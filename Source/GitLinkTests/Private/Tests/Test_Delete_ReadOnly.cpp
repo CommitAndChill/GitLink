@@ -11,7 +11,7 @@
 // --------------------------------------------------------------------------------------------------------------------
 // Regression for the v0.4.1 read-only-delete fix.
 //
-// BusterBlock's .uasset/.umap are git-lfs `lockable`, so git-lfs keeps them read-only on disk
+// In a typical UE repo .uasset/.umap are git-lfs `lockable`, so git-lfs keeps them read-only on disk
 // until the user holds the lock. A plain content-browser delete never runs the checkout (lock)
 // path, so the working file is still read-only when Cmd_Delete tries to remove it — and on
 // Windows IPlatformFile::DeleteFile is a bare DeleteFileW that fails ACCESS_DENIED on read-only

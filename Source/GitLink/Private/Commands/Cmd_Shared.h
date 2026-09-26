@@ -41,7 +41,7 @@ namespace gitlink::cmd
 	// hides per-request latency without saturating cores — most workers spend their time in
 	// FEvent::Wait). Status walks are the opposite shape: each walk reads the entire
 	// submodule's working tree off-disk and hashes it through libgit2 — pure CPU + disk.
-	// Stage B observation: with 34 submodules in the BB project, an 8-worker fan-out of
+	// Observed on a production project with 34 submodules: an 8-worker fan-out of
 	// status walks pinned all 8 physical cores during each sweep, producing the visible
 	// 120 s CPU spike. 4 keeps each spike under ~50% aggregate CPU; the sweep is background,
 	// so the doubled wall-clock cost (still well under the 120 s poll interval on this

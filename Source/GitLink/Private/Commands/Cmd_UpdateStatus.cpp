@@ -24,12 +24,12 @@ namespace gitlink::op
 namespace
 {
 	// Throttle for the expensive cross-repo sweep (per-submodule git status + per-repo LFS
-	// lock poll). Background poll fires every PollIntervalSeconds on the timer (default 120s
-	// post-Stage B). Saves trigger an immediate re-poll which would otherwise re-run the full
+	// lock poll). Background poll fires every PollIntervalSeconds on the timer (default 120s).
+	// Saves trigger an immediate re-poll which would otherwise re-run the full
 	// 34-repo sweep — that's the source of the visible CPU spikes. We skip the sweep if it
 	// ran recently; the regular timer poll always runs because the throttle is < interval.
 	//
-	// Stage B raised this from 20s → 110s to match the 120s default sweep cadence. Foreground
+	// A 2026 tuning pass raised this from 20s → 110s to match the 120s default sweep cadence. Foreground
 	// freshness (≤2s on user-touched files) is now driven by single-file probes from editor
 	// delegates (focus, package-dirty, asset-open, pre-checkout) — see GitLink_LfsHttpClient's
 	// Request_SingleFileLock — so the cross-repo sweep no longer needs to be the latency floor
@@ -577,7 +577,7 @@ namespace gitlink::cmd
 			for (const FString& RelPath : TrackedRelPaths)
 			{ TrackedSet.Add(RelPath); }
 
-			// Stage B — fire-and-forget async LFS lock refresh for any lockable requested file.
+			// Fire-and-forget async LFS lock refresh for any lockable requested file.
 			//
 			// Earlier rev of this code blocked the calling thread on `Request_SingleFileLock`
 			// inside a ParallelFor. That deadlocked when UpdateStatus was dispatched
