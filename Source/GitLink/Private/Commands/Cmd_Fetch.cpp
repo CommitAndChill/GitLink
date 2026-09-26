@@ -1,3 +1,4 @@
+#include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
 #include "GitLinkLog.h"
 
@@ -26,7 +27,8 @@ namespace gitlink::cmd
 
 		UE_LOG(LogGitLink, Log, TEXT("Cmd_Fetch: fetching from the tracked remote"));
 
-		const gitlink::FFetchParams Params;  // empty RemoteName = the branch's tracked remote
+		gitlink::FFetchParams Params;  // empty RemoteName = the branch's tracked remote
+		Params.Credentials = Make_GitCredentialProvider(InCtx.Subprocess);
 
 		const FResult FetchRes = InCtx.Repository->Fetch(Params, /*InProgress=*/ nullptr);
 		if (!FetchRes)
