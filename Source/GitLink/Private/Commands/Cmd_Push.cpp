@@ -1,5 +1,6 @@
 #include "Cmd_Push.h"
 
+#include "GitLink_LfsHttpClient.h"
 #include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 
@@ -21,7 +22,8 @@ namespace gitlink::cmd
 		const FGitLink_SubprocessResult Result = InSubprocess.Run_Bounded({ TEXT("push") }, InRepoRoot, InTimeoutSec);
 		if (!Result.IsSuccess())
 		{
-			Outcome.ErrorMessage = Result.Get_CombinedError();
+			// git normally redacts credentials itself; strip any "user:token@" anyway before it reaches a toast.
+			Outcome.ErrorMessage = gitlink::lfs_http::detail::Strip_UrlUserInfo(Result.Get_CombinedError());
 			UE_LOG(LogGitLink, Warning, TEXT("Cmd_Push: 'git push' failed (exit %d): %s"),
 				Result.ExitCode, *Outcome.ErrorMessage);
 			return Outcome;
