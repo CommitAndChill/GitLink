@@ -1285,8 +1285,17 @@ auto FGitLink_Provider::UsesSnapshots              () const -> bool { return fal
 #endif
 
 #if !UE_VERSION_OLDER_THAN(5, 3, 0)
-auto FGitLink_Provider::CanExecuteOperation(const FSourceControlOperationRef& /*InOperation*/) const -> bool
+auto FGitLink_Provider::CanExecuteOperation(const FSourceControlOperationRef& InOperation) const -> bool
 {
+	// Named changelists are not implemented (see Cmd_Changelists.cpp) — report them unavailable
+	// so callers that check can hide the action instead of hitting the failure.
+	static const FName NewChangelistName    = TEXT("NewChangelist");
+	static const FName DeleteChangelistName = TEXT("DeleteChangelist");
+	static const FName EditChangelistName   = TEXT("EditChangelist");
+	const FName OperationName = InOperation->GetName();
+	if (OperationName == NewChangelistName || OperationName == DeleteChangelistName || OperationName == EditChangelistName)
+	{ return false; }
+
 	return _bGitRepositoryFound;
 }
 
