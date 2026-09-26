@@ -712,7 +712,7 @@ auto FGitLink_LfsHttpClient::Request_LocksVerify(const FString& InRepoRoot)
 		Out.AllLocks.Append(Page.AllLocks);
 		Out.OursPaths.Append(Page.OursPaths);
 
-		// Stage B — opportunistically learn the LFS-server identity for this host from any
+		// Opportunistically learn the LFS-server identity for this host from any
 		// successful page that contains an `ours` entry. This is the only way to correctly
 		// classify Locked vs LockedOther on the cheaper `GET /locks?path=...` single-file
 		// path, which doesn't pre-classify.
@@ -736,7 +736,7 @@ auto FGitLink_LfsHttpClient::Request_LocksVerify(const FString& InRepoRoot)
 }
 
 // --------------------------------------------------------------------------------------------------------------------
-// Stage B — single-file lock probe path. Reuses the auth cache, 429 backoff, sync-wait pattern,
+// Single-file lock probe path. Reuses the auth cache, 429 backoff, sync-wait pattern,
 // and rate-limit telemetry of the verify path; the only differences are the verb (GET), the URL
 // shape (?path=<rel>), the response shape (raw `locks` array — no ours/theirs split), and the
 // classification step (compare owner.name to the cached LFS-server identity).

@@ -252,7 +252,7 @@ public:
 	// PackageSavedWithContext hook to get sub-2-second View Changes refresh.
 	auto Request_ImmediatePoll() -> void;
 
-	// Stage B — async single-file LFS lock refresh, fired by editor delegates (focus,
+	// Async single-file LFS lock refresh, fired by editor delegates (focus,
 	// asset-opened, package-dirtied) and by the explicit-file-list pre-checkout path.
 	// Drops out fast for non-lockable / outside-repo / untracked-submodule files. Per-path
 	// debounce (kSingleFileRefreshDebounceSec) prevents thundering herd when many files
@@ -329,7 +329,7 @@ private:
 	FSourceControlStateChanged _OnSourceControlStateChanged;
 	FDelegateHandle _PackageSavedHandle;
 
-	// Stage B — editor signal delegate handles for single-file LFS lock refresh. Bound in
+	// Editor signal delegate handles for single-file LFS lock refresh. Bound in
 	// CheckRepositoryStatus, unbound in Close.
 	FDelegateHandle _AppActivationHandle;     // FSlateApplication::OnApplicationActivationStateChanged
 	FDelegateHandle _AssetEditorOpenedHandle; // UAssetEditorSubsystem::OnAssetOpenedInEditor

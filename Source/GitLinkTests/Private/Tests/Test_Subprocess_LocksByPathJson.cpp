@@ -5,7 +5,7 @@
 
 // --------------------------------------------------------------------------------------------------------------------
 // Tests for FGitLink_Subprocess::Parse_LocksByPathJson — the single-file response parser used by
-// the Stage B `GET /locks?path=...` probe.
+// the `GET /locks?path=...` probe.
 //
 // Why this matters: the single-file path is the freshness driver for foreground UX (focus,
 // asset-opened, package-dirty, pre-checkout). A bug here would manifest as either (a) silently
