@@ -15,10 +15,10 @@
 // The persistence layer + the FMoveToChangelist / FNewChangelist / FDeleteChangelist /
 // FEditChangelist operations land with GitLink_Changelists_Store.
 //
-// PASS 3 STUBS: all operations return success so the editor's 'Move to changelist' menu
-// doesn't spew errors, but nothing actually happens. The static default "Working" and "Staged"
-// changelists (declared in GitLink_Changelist.cpp) are the only ones the editor sees until
-// the real store lands.
+// Named changelists are NOT supported yet: New/Delete/Edit fail with a clear message instead of
+// reporting success while doing nothing, and CanExecuteOperation reports them unavailable. The
+// static "Working" and "Staged" changelists (declared in GitLink_Changelist.cpp) are the only
+// ones the editor sees; moving files between those two stages/unstages them.
 // --------------------------------------------------------------------------------------------------------------------
 
 namespace gitlink::cmd
@@ -35,8 +35,8 @@ namespace gitlink::cmd
 		const FSourceControlOperationRef& /*InOperation*/,
 		const TArray<FString>&            /*InFiles*/) -> FCommandResult
 	{
-		UE_LOG(LogGitLink, Log, TEXT("Cmd_NewChangelist[stub]"));
-		return FCommandResult::Ok();
+		return FCommandResult::Fail(LOCTEXT("NewChangelistUnsupported",
+			"GitLink does not support named changelists yet. Use the Working and Staged changelists."));
 	}
 
 	auto DeleteChangelist(
@@ -44,8 +44,8 @@ namespace gitlink::cmd
 		const FSourceControlOperationRef& /*InOperation*/,
 		const TArray<FString>&            /*InFiles*/) -> FCommandResult
 	{
-		UE_LOG(LogGitLink, Log, TEXT("Cmd_DeleteChangelist[stub]"));
-		return FCommandResult::Ok();
+		return FCommandResult::Fail(LOCTEXT("DeleteChangelistUnsupported",
+			"GitLink does not support named changelists yet. Use the Working and Staged changelists."));
 	}
 
 	auto EditChangelist(
@@ -53,8 +53,8 @@ namespace gitlink::cmd
 		const FSourceControlOperationRef& /*InOperation*/,
 		const TArray<FString>&            /*InFiles*/) -> FCommandResult
 	{
-		UE_LOG(LogGitLink, Log, TEXT("Cmd_EditChangelist[stub]"));
-		return FCommandResult::Ok();
+		return FCommandResult::Fail(LOCTEXT("EditChangelistUnsupported",
+			"GitLink does not support named changelists yet. Use the Working and Staged changelists."));
 	}
 
 	auto MoveToChangelist(
@@ -83,11 +83,11 @@ namespace gitlink::cmd
 		const bool bToWorking = DestName == FGitLink_Changelist::WorkingChangelist.Get_Name();
 		if (!bToStaged && !bToWorking)
 		{
-			// Named changelists — stub for now (persistence layer pending).
-			UE_LOG(LogGitLink, Log,
-				TEXT("Cmd_MoveToChangelist: named changelist '%s' — %d file(s), persistence pending"),
-				*DestName, InFiles.Num());
-			return FCommandResult::Ok();
+			// Named changelists are not supported yet — fail rather than silently dropping the move.
+			return FCommandResult::Fail(FText::Format(
+				LOCTEXT("MoveNamedUnsupported",
+					"GitLink does not support named changelists yet (tried to move {0} file(s) to '{1}')."),
+				FText::AsNumber(InFiles.Num()), FText::FromString(DestName)));
 		}
 
 		// Partition by repo and stage/unstage against the owning repository (Pitfall #5 —
