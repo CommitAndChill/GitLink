@@ -156,6 +156,33 @@ namespace gitlink::op
 			}
 			return RawRemote;
 		}
+
+		// Resolves FFetchParams::RemoteName: an explicit name wins; empty means the remote HEAD's
+		// branch tracks (branch.<name>.remote), else "origin". A local upstream (".") has no remote
+		// to fetch, so it also falls back to "origin".
+		auto Resolve_RemoteName(git_repository* InRepo, const FString& InRequested) -> FString
+		{
+			if (!InRequested.IsEmpty())
+			{ return InRequested; }
+
+			FString Resolved;
+			git_reference* RawHead = nullptr;
+			if (git_repository_head(&RawHead, InRepo) == 0 && RawHead != nullptr)
+			{
+				libgit2::FReferencePtr Head(RawHead);
+				if (git_reference_is_branch(Head.Get()) != 0)
+				{
+					git_buf Buf = GIT_BUF_INIT;
+					if (git_branch_upstream_remote(&Buf, InRepo, git_reference_name(Head.Get())) == 0 && Buf.ptr != nullptr)
+					{ Resolved = UTF8_TO_TCHAR(Buf.ptr); }
+					git_buf_dispose(&Buf);
+				}
+			}
+			else if (RawHead != nullptr)
+			{ git_reference_free(RawHead); }
+
+			return (Resolved.IsEmpty() || Resolved == TEXT(".")) ? FString(TEXT("origin")) : Resolved;
+		}
 	}
 #endif  // WITH_LIBGIT2
 
@@ -170,12 +197,13 @@ namespace gitlink::op
 
 		git_repository* Raw = InRepo.Get_RawHandle();
 
-		libgit2::FRemotePtr Remote(Open_Remote(Raw, InParams.RemoteName));
+		const FString RemoteName = Resolve_RemoteName(Raw, InParams.RemoteName);
+		libgit2::FRemotePtr Remote(Open_Remote(Raw, RemoteName));
 		if (!Remote.IsValid())
 		{
 			return FResult::Fail(FString::Printf(
 				TEXT("FetchRemote: remote '%s' not found: %s"),
-				*InParams.RemoteName, *libgit2::Get_LastErrorMessage()));
+				*RemoteName, *libgit2::Get_LastErrorMessage()));
 		}
 
 		FCallbackPayload Payload;
@@ -202,7 +230,7 @@ namespace gitlink::op
 			return libgit2::MakeFailResult(TEXT("FetchRemote: git_remote_fetch"), Rc);
 		}
 
-		UE_LOG(LogGitLinkCore, Log, TEXT("FetchRemote: '%s' completed"), *InParams.RemoteName);
+		UE_LOG(LogGitLinkCore, Log, TEXT("FetchRemote: '%s' completed"), *RemoteName);
 		return FResult::Ok();
 #else
 		return FResult::Fail(TEXT("FetchRemote: compiled without libgit2"));

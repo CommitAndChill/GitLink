@@ -43,7 +43,10 @@ namespace gitlink
 	// --------------------------------------------------------------------------------------------------------------------
 	struct GITLINKCORE_API FFetchParams
 	{
-		FString RemoteName = TEXT("origin");
+		// Empty = the remote the current branch tracks (branch.<name>.remote), falling back to
+		// "origin" when HEAD is detached or has no upstream. PullFastForward fast-forwards to the
+		// branch's upstream, so fetching any other remote would compare against a stale ref.
+		FString RemoteName;
 		bool    bPrune     = false;
 	};
 
