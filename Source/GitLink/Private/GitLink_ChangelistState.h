@@ -5,7 +5,7 @@
 #include <CoreMinimal.h>
 #include <ISourceControlChangelistState.h>
 #include <ISourceControlState.h>
-#include <Runtime/Launch/Resources/Version.h>
+#include <Misc/EngineVersionComparison.h>
 
 // --------------------------------------------------------------------------------------------------------------------
 // FGitLink_ChangelistState — tracks files and description for a given FGitLink_Changelist.
@@ -35,7 +35,7 @@ public:
 	auto GetDisplayTooltip() const -> FText         override;
 	auto GetTimeStamp()      const -> const FDateTime& override { return _TimeStamp; }
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4
+#if !UE_VERSION_OLDER_THAN(5, 4, 0)
 	auto GetFilesStates()        const -> const TArray<FSourceControlStateRef> override { return _Files; }
 	auto GetFilesStatesNum()     const -> int32 override { return _Files.Num(); }
 	auto GetShelvedFilesStates() const -> const TArray<FSourceControlStateRef> override { return _ShelvedFiles; }

@@ -2,7 +2,7 @@
 
 #include <CoreMinimal.h>
 #include <ISourceControlProvider.h>
-#include <Runtime/Launch/Resources/Version.h>
+#include <Misc/EngineVersionComparison.h>
 
 struct FToolMenuSection;
 class FMenuBuilder;
