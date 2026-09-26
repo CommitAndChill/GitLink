@@ -46,6 +46,26 @@ namespace gitlink::op
 			FString           PushRefError;
 		};
 
+		// "scheme://user:secret@host/path" -> "scheme://host/path", for logging only.
+		auto Redact_UrlUserInfo(const FString& InUrl) -> FString
+		{
+			const int32 SchemeSep = InUrl.Find(TEXT("://"), ESearchCase::CaseSensitive);
+			if (SchemeSep == INDEX_NONE)
+			{ return InUrl; }
+
+			const int32 AuthorityStart = SchemeSep + 3;
+			int32 AuthorityEnd = InUrl.Find(TEXT("/"), ESearchCase::CaseSensitive, ESearchDir::FromStart, AuthorityStart);
+			if (AuthorityEnd == INDEX_NONE)
+			{ AuthorityEnd = InUrl.Len(); }
+
+			const FString Authority = InUrl.Mid(AuthorityStart, AuthorityEnd - AuthorityStart);
+			int32 AtPos = INDEX_NONE;
+			if (!Authority.FindLastChar(TEXT('@'), AtPos))
+			{ return InUrl; }
+
+			return InUrl.Left(AuthorityStart) + Authority.Mid(AtPos + 1) + InUrl.Mid(AuthorityEnd);
+		}
+
 		// ---- Credential ----
 		int CredentialAcquire_Cb(
 			git_credential** OutCred,
@@ -73,7 +93,7 @@ namespace gitlink::op
 				TEXT("CredentialAcquire: unsupported auth type(s) 0x%X for '%s' ")
 				TEXT("(SSH requires libgit2 built with USE_SSH=ON)"),
 				InAllowedTypes,
-				InUrl ? UTF8_TO_TCHAR(InUrl) : TEXT("(null)"));
+				InUrl ? *Redact_UrlUserInfo(UTF8_TO_TCHAR(InUrl)) : TEXT("(null)"));
 			return GIT_EUSER;
 		}
 

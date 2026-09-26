@@ -320,7 +320,8 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 	const TArray<gitlink::FRemote> Remotes = _Repository->Get_Remotes();
 	if (Remotes.Num() > 0)
 	{
-		Snap.RemoteUrl = Remotes[0].FetchUrl;
+		// Display/log only — strip any embedded "user:token@" before it reaches the UI or a log.
+		Snap.RemoteUrl = gitlink::lfs_http::detail::Strip_UrlUserInfo(Remotes[0].FetchUrl);
 	}
 
 	// Read user.name / user.email from git config. Empty values mean the user hasn't configured

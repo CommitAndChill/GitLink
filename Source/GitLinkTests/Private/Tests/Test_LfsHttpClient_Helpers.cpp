@@ -21,6 +21,8 @@ using gitlink::lfs_http::detail::Get_HostPort;
 using gitlink::lfs_http::detail::Convert_SshRemoteToHttps;
 using gitlink::lfs_http::detail::Parse_CredentialOutput;
 using gitlink::lfs_http::detail::Parse_RetryAfterSeconds;
+using gitlink::lfs_http::detail::Strip_UrlUserInfo;
+using gitlink::lfs_http::detail::Is_LoopbackHostPort;
 
 // --------------------------------------------------------------------------------------------------------------------
 // Get_HostKey: "scheme://host[:port]" extraction. Used as the credential-cache key, so two URLs
@@ -248,6 +250,71 @@ bool FGitLinkTests_LfsHttp_RetryAfter::RunTest(const FString& /*Parameters*/)
 	TestEqual(TEXT("garbage → default"),
 		Parse_RetryAfterSeconds(TEXT("not a number"), kDefault), kDefault);
 
+	return true;
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+// Userinfo redaction. A remote URL can carry a token ("https://user:ghp_x@github.com/…"); it must
+// never become part of the credential-cache key, a log line, or the `host=` sent to the helper.
+// --------------------------------------------------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FGitLinkTests_LfsHttp_UserInfoRedaction,
+	"GitLink.LfsHttp.UserInfoRedaction",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FGitLinkTests_LfsHttp_UserInfoRedaction::RunTest(const FString& /*Parameters*/)
+{
+	TestEqual(TEXT("host key drops user:token"),
+		Get_HostKey(TEXT("https://alice:tok123@github.com/org/repo.git/info/lfs")),
+		FString(TEXT("https://github.com")));
+	TestEqual(TEXT("host key drops bare user, keeps port"),
+		Get_HostKey(TEXT("https://alice@git.example.com:8443/org/repo")),
+		FString(TEXT("https://git.example.com:8443")));
+	TestEqual(TEXT("host port drops user:token"),
+		Get_HostPort(TEXT("https://alice:tok123@github.com/org/repo")),
+		FString(TEXT("github.com")));
+	TestTrue(TEXT("authority that is only userinfo is rejected"),
+		Get_HostKey(TEXT("https://alice:tok@/org/repo")).IsEmpty());
+
+	TestEqual(TEXT("strip user:token, keep path"),
+		Strip_UrlUserInfo(TEXT("https://alice:tok123@github.com/org/repo.git")),
+		FString(TEXT("https://github.com/org/repo.git")));
+	TestEqual(TEXT("strip with no path"),
+		Strip_UrlUserInfo(TEXT("https://alice:tok123@github.com")),
+		FString(TEXT("https://github.com")));
+	TestEqual(TEXT("'@' in the path is not userinfo"),
+		Strip_UrlUserInfo(TEXT("https://github.com/org/repo@v2.git")),
+		FString(TEXT("https://github.com/org/repo@v2.git")));
+	TestEqual(TEXT("no userinfo is unchanged"),
+		Strip_UrlUserInfo(TEXT("https://github.com/org/repo.git")),
+		FString(TEXT("https://github.com/org/repo.git")));
+	TestEqual(TEXT("scp-style is left alone (no scheme)"),
+		Strip_UrlUserInfo(TEXT("git@github.com:org/repo.git")),
+		FString(TEXT("git@github.com:org/repo.git")));
+
+	return true;
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+// Loopback detection gates Basic auth over plain http: allowed only to a local (test) server.
+// --------------------------------------------------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FGitLinkTests_LfsHttp_LoopbackHostPort,
+	"GitLink.LfsHttp.LoopbackHostPort",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FGitLinkTests_LfsHttp_LoopbackHostPort::RunTest(const FString& /*Parameters*/)
+{
+	TestTrue(TEXT("localhost"),            Is_LoopbackHostPort(TEXT("localhost")));
+	TestTrue(TEXT("LOCALHOST:8080"),       Is_LoopbackHostPort(TEXT("LOCALHOST:8080")));
+	TestTrue(TEXT("127.0.0.1:12345"),      Is_LoopbackHostPort(TEXT("127.0.0.1:12345")));
+	TestTrue(TEXT("[::1]:80"),             Is_LoopbackHostPort(TEXT("[::1]:80")));
+	TestFalse(TEXT("github.com"),          Is_LoopbackHostPort(TEXT("github.com")));
+	TestFalse(TEXT("localhost.evil.com"),  Is_LoopbackHostPort(TEXT("localhost.evil.com")));
+	TestFalse(TEXT("127.0.0.1.evil.com"),  Is_LoopbackHostPort(TEXT("127.0.0.1.evil.com")));
+	TestFalse(TEXT("10.0.0.5"),            Is_LoopbackHostPort(TEXT("10.0.0.5")));
 	return true;
 }
 

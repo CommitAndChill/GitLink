@@ -20,9 +20,18 @@ namespace gitlink::lfs_http
 	// silently route requests at the wrong host or fail to find a cached credential.
 	namespace detail
 	{
-		// Returns "scheme://host[:port]" from an http(s) URL — the credential cache key.
+		// Returns "scheme://host[:port]" from an http(s) URL — the credential cache key. Any
+		// "user:secret@" userinfo is dropped, so a token embedded in a remote URL never becomes
+		// part of a key, a log line or a credential-helper query.
 		// Empty for non-http(s) URLs (ssh, file, git@-style, malformed).
 		GITLINK_API auto Get_HostKey(const FString& InUrl) -> FString;
+
+		// Removes "user[:secret]@" from the authority of a "scheme://…" URL; other input is
+		// returned unchanged. Apply before logging or displaying any remote URL.
+		GITLINK_API auto Strip_UrlUserInfo(const FString& InUrl) -> FString;
+
+		// True for a "host[:port]" that is localhost, 127.0.0.1 or [::1].
+		GITLINK_API auto Is_LoopbackHostPort(const FString& InHostPort) -> bool;
 
 		// Returns "host[:port]" for use in `git credential fill` input. Empty on non-http(s).
 		GITLINK_API auto Get_HostPort(const FString& InUrl) -> FString;
