@@ -10,6 +10,7 @@
 #include <HAL/FileManager.h>
 #include <HAL/PlatformFileManager.h>
 #include <Misc/AutomationTest.h>
+#include <Misc/ScopeExit.h>
 #include <Misc/FileHelper.h>
 #include <Misc/Paths.h>
 
@@ -118,6 +119,7 @@ bool FGitLinkTests_Subprocess_RunToFile_RoundTripBinary::RunTest(const FString& 
 	{ return false; }
 
 	const FString OutPath = MakeScratchOutputPath(TEXT("out.bin"));
+	ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*FPaths::GetPath(OutPath), /*RequireExists=*/ false, /*Tree=*/ true); };
 
 	FGitLink_Subprocess Sub(TEXT("git"), FString());
 	const bool bOk = Sub.RunToFile(
@@ -170,6 +172,7 @@ bool FGitLinkTests_Subprocess_RunToFile_FailsOnZeroByteSuccess::RunTest(const FS
 	const FString Hash = Log[0].Hash;
 
 	const FString OutPath = MakeScratchOutputPath(TEXT("empty.bin"));
+	ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*FPaths::GetPath(OutPath), /*RequireExists=*/ false, /*Tree=*/ true); };
 
 	// Suppress the expected warning RunToFile emits when it rejects exit-0-empty-stdout, so this expected
 	// behaviour doesn't show up as noise in the automation report.
@@ -218,6 +221,7 @@ bool FGitLinkTests_Subprocess_RunToFile_FailsOnMissingPath::RunTest(const FStrin
 	{ return false; }
 
 	const FString OutPath = MakeScratchOutputPath(TEXT("nope.bin"));
+	ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*FPaths::GetPath(OutPath), /*RequireExists=*/ false, /*Tree=*/ true); };
 
 	// Suppress the expected non-zero-exit warning so the automation report stays clean.
 	AddExpectedMessagePlain(
