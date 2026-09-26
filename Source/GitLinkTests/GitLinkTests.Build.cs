@@ -35,6 +35,7 @@ public class GitLinkTests : ModuleRules
 		{
 			"GitLink",
 			"SourceControl",
+			"HTTP",   // live LFS tests pump FHttpManager while the client waits on a worker thread
 		});
 	}
 }
