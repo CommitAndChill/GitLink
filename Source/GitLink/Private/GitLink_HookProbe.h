@@ -2,9 +2,12 @@
 
 #include <CoreMinimal.h>
 
+class FGitLink_Subprocess;
+
 // --------------------------------------------------------------------------------------------------------------------
-// FGitLink_HookProbe — scans `.git/hooks/` at connect time to detect which git hook scripts
-// exist. libgit2 silently ignores hooks, so any operation that has a corresponding hook must
+// FGitLink_HookProbe — scans the repository's hooks directory at connect time to detect which git
+// hook scripts exist. The directory is resolved the way git resolves it (`core.hooksPath`, linked
+// worktrees, submodules whose `.git` is a file), not assumed to be `.git/hooks`. libgit2 silently ignores hooks, so any operation that has a corresponding hook must
 // be routed through `FGitLink_Subprocess` (git.exe) instead of the in-process libgit2 path
 // so the hook actually runs.
 //
@@ -38,11 +41,18 @@ struct FGitLink_HookFlags
 	}
 };
 
-class FGitLink_HookProbe
+class GITLINK_API FGitLink_HookProbe
 {
 public:
-	// Scans InRepoRoot/.git/hooks/ and returns which hooks are present. Files ending in
-	// ".sample" are excluded (git ships sample hooks that aren't active). Empty/non-existent
-	// hooks directory returns all-false flags.
-	static auto Probe(const FString& InRepoRoot) -> FGitLink_HookFlags;
+	// Resolves the hooks directory with `git rev-parse --git-path hooks` (honours core.hooksPath and
+	// linked worktrees / submodules), falling back to InRepoRoot/.git/hooks when git is unavailable,
+	// then reports which hooks are present. Files ending in ".sample" are excluded (git ships sample
+	// hooks that aren't active). Empty/non-existent hooks directory returns all-false flags.
+	static auto Probe(const FString& InRepoRoot, FGitLink_Subprocess* InGit = nullptr) -> FGitLink_HookFlags;
+
+	// The directory Probe scans. Exposed for tests.
+	static auto Resolve_HooksDir(const FString& InRepoRoot, FGitLink_Subprocess* InGit) -> FString;
+
+	// Scans a specific hooks directory.
+	static auto Probe_Directory(const FString& InHooksDir) -> FGitLink_HookFlags;
 };

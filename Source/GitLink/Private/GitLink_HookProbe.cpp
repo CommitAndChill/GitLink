@@ -1,5 +1,6 @@
 #include "GitLink_HookProbe.h"
 
+#include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
 
 #include <HAL/PlatformFileManager.h>
@@ -7,17 +8,44 @@
 
 // --------------------------------------------------------------------------------------------------------------------
 
-auto FGitLink_HookProbe::Probe(const FString& InRepoRoot) -> FGitLink_HookFlags
+auto FGitLink_HookProbe::Resolve_HooksDir(const FString& InRepoRoot, FGitLink_Subprocess* InGit) -> FString
+{
+	const FString Fallback = FPaths::Combine(InRepoRoot, TEXT(".git"), TEXT("hooks"));
+	if (InGit == nullptr || !InGit->IsValid())
+	{ return Fallback; }
+
+	// `--git-path hooks` answers with core.hooksPath when set, and with the common git dir's hooks for
+	// a linked worktree or a submodule (where .git is a file) — the cases a fixed .git/hooks misses.
+	const FGitLink_SubprocessResult Result = InGit->Run_Bounded(
+		{ TEXT("rev-parse"), TEXT("--git-path"), TEXT("hooks") }, InRepoRoot, /*InTimeoutSec=*/ 15.0);
+	FString Dir = Result.IsSuccess() ? Result.StdOut.TrimStartAndEnd() : FString();
+	if (Dir.IsEmpty())
+	{ return Fallback; }
+
+	// git prints it relative to the working directory unless it is absolute.
+	if (FPaths::IsRelative(Dir))
+	{ Dir = FPaths::Combine(InRepoRoot, Dir); }
+	FPaths::NormalizeDirectoryName(Dir);
+	FPaths::CollapseRelativeDirectories(Dir);
+	return Dir;
+}
+
+auto FGitLink_HookProbe::Probe(const FString& InRepoRoot, FGitLink_Subprocess* InGit) -> FGitLink_HookFlags
+{
+	return Probe_Directory(Resolve_HooksDir(InRepoRoot, InGit));
+}
+
+auto FGitLink_HookProbe::Probe_Directory(const FString& InHooksDir) -> FGitLink_HookFlags
 {
 	FGitLink_HookFlags Flags;
 
-	const FString HooksDir = FPaths::Combine(InRepoRoot, TEXT(".git"), TEXT("hooks"));
+	const FString& HooksDir = InHooksDir;
 
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
 	if (!PlatformFile.DirectoryExists(*HooksDir))
 	{
 		UE_LOG(LogGitLink, Verbose,
-			TEXT("HookProbe: no .git/hooks/ directory found at '%s'"), *HooksDir);
+			TEXT("HookProbe: no hooks directory at '%s'"), *HooksDir);
 		return Flags;
 	}
 
