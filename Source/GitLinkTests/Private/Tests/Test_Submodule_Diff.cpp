@@ -10,6 +10,7 @@
 #include <HAL/FileManager.h>
 #include <HAL/PlatformFileManager.h>
 #include <Misc/AutomationTest.h>
+#include <Misc/ScopeExit.h>
 #include <Misc/FileHelper.h>
 #include <Misc/Paths.h>
 
@@ -126,6 +127,7 @@ bool FGitLinkTests_Submodule_Diff_ExtractsBinaryFromSubmoduleRoot::RunTest(const
 	// The core assertion: RunToFile, routed at the inner repo via `-C`, extracts the fixture bytes unchanged.
 	// This is the same code path FGitLink_Revision::Get takes when the requested file lives in a submodule.
 	const FString OutPath = MakeScratchOutputPath_Sub(TEXT("sub_out.bin"));
+	ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*FPaths::GetPath(OutPath), /*RequireExists=*/ false, /*Tree=*/ true); };
 
 	FGitLink_Subprocess Sub(TEXT("git"), FString());
 	const bool bOk = Sub.RunToFile(
@@ -153,6 +155,7 @@ bool FGitLinkTests_Submodule_Diff_ExtractsBinaryFromSubmoduleRoot::RunTest(const
 			1);
 
 		const FString OuterOut = MakeScratchOutputPath_Sub(TEXT("outer_out.bin"));
+		ON_SCOPE_EXIT { IFileManager::Get().DeleteDirectory(*FPaths::GetPath(OuterOut), /*RequireExists=*/ false, /*Tree=*/ true); };
 		const bool bOuter = Sub.RunToFile(
 			{ TEXT("-C"), Outer.Get_Root(), TEXT("cat-file"), TEXT("--filters"), TEXT("HEAD:asset.bin") },
 			OuterOut);
