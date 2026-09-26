@@ -4,7 +4,13 @@ Drop-in location for the prebuilt libgit2 shared library that `GitLinkCore` link
 
 ## Target version
 
-**libgit2 v1.9.0**
+**libgit2 v1.9.0** (tag `v1.9.0`). Built with WinHTTP for HTTPS and without SSH support.
+
+## License
+
+libgit2 is licensed under GPLv2 with a linking exception, which permits linking it into
+GitLink under GitLink's own license. The full text is in [`COPYING`](COPYING) (copied
+verbatim from the `v1.9.0` tag) and must be kept alongside the binaries.
 
 ## Expected layout (Win64)
 
@@ -64,4 +70,4 @@ Avoids vendoring OpenSSL alongside libgit2 and picks up Windows trust store + pr
 
 ## Mac / Linux
 
-Not supported in v0.1. The `Build.cs` is structured so adding them later is a matter of dropping the right binaries into `lib/Mac/`, `bin/Mac/`, etc. and extending the platform check.
+Not supported yet. The `Build.cs` is structured so adding them later is a matter of dropping the right binaries into `lib/Mac/`, `bin/Mac/`, etc. and extending the platform check.
