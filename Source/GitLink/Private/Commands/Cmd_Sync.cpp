@@ -1,3 +1,4 @@
+#include "Cmd_Shared.h"
 #include "GitLink_CommandDispatcher.h"
 #include "GitLink_Subprocess.h"
 #include "GitLinkLog.h"
@@ -31,7 +32,8 @@ namespace gitlink::cmd
 
 		UE_LOG(LogGitLink, Log, TEXT("Cmd_Sync: pulling from the tracked remote (fast-forward)"));
 
-		const gitlink::FFetchParams Params;  // empty RemoteName = the branch's tracked remote
+		gitlink::FFetchParams Params;  // empty RemoteName = the branch's tracked remote
+		Params.Credentials = Make_GitCredentialProvider(InCtx.Subprocess);
 
 		const FResult PullRes = InCtx.Repository->PullFastForward(Params, /*InProgress=*/ nullptr);
 		if (!PullRes)

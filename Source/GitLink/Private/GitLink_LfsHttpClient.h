@@ -40,6 +40,12 @@ namespace gitlink::lfs_http
 		// any other form (already-https, ssh://, etc.).
 		GITLINK_API auto Convert_SshRemoteToHttps(const FString& InUrl) -> FString;
 
+		// Asks git's credential helper (`git credential fill`) for the credential for InUrl's scheme + host (userinfo
+		// ignored). https only, except a loopback host. Non-interactive and bounded. True when a password was returned.
+		GITLINK_API auto Fill_CredentialForUrl(
+			const FString& InGitBinary, const FString& InWorkingDir, const FString& InUrl,
+			FString& OutUser, FString& OutPass) -> bool;
+
 		// Parses `git credential fill` line-oriented `key=value` stdout into username and
 		// password. Returns true if a non-empty password was found (username may be empty
 		// for token-only flows).

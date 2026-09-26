@@ -11,12 +11,13 @@
 // --------------------------------------------------------------------------------------------------------------------
 // op::FetchRemote / op::PushRemote — network operations with progress + credentials.
 //
-// Credentials policy (v1):
-//   - HTTPS: we return GIT_PASSTHROUGH from the credential callback, which causes libgit2 to fall
-//     back to its transport layer. Because the libgit2 binaries are built with USE_HTTPS=WinHTTP,
-//     HTTPS auth is handled by Windows WinHTTP, which picks up credentials from the Windows
-//     Credential Manager (same store `git` uses via git-credential-manager). No plaintext secrets
-//     ever pass through the plugin.
+// Credentials policy:
+//   - HTTPS: libgit2 has no credential store, and WinHTTP does NOT read Git Credential Manager — answering a
+//     username/password request with GIT_PASSTHROUGH yields a 401 from any private remote (verified against a private
+//     GitHub repo by GitLink.Live.FetchAndPull.PrivateHttps). The caller therefore supplies FFetchParams::Credentials,
+//     which the GitLink module backs with `git credential fill`, so libgit2 authenticates exactly as the git CLI does.
+//     One attempt per operation: if the server rejects that credential, libgit2 calls back again and we stop rather
+//     than loop.
 //   - SSH: unsupported in v1. Our libgit2 build has USE_SSH=OFF (see Source/ThirdParty/libgit2/
 //     README.md), so the credential callback will report an error for SSH-typed requests. Rebuild
 //     libgit2 with SSH and add key-loading logic if needed.
@@ -44,6 +45,11 @@ namespace gitlink::op
 			// Set by PushUpdateReference_Cb when the server rejects a ref update. git_remote_push
 			// still returns 0 in that case, so PushRemote must check this after the call.
 			FString           PushRefError;
+
+			// Optional username/password source (FFetchParams::Credentials) and how often it was consulted.
+			const FCredentialProvider* Credentials         = nullptr;
+			int32                      CredentialAttempts  = 0;
+			bool                       bCredentialRejected = false;
 		};
 
 		// "scheme://user:secret@host/path" -> "scheme://host/path", for logging only.
@@ -72,12 +78,33 @@ namespace gitlink::op
 			const char*      InUrl,
 			const char*      /*InUsernameFromUrl*/,
 			unsigned int     InAllowedTypes,
-			void*            /*Payload*/)
+			void*            InPayload)
 		{
-			// HTTPS userpass: hand off to the transport. WinHTTP picks up credentials from the
-			// Windows credential store automatically, so GIT_PASSTHROUGH is the right answer.
+			auto* Payload = static_cast<FCallbackPayload*>(InPayload);
+
 			if ((InAllowedTypes & GIT_CREDENTIAL_USERPASS_PLAINTEXT) != 0)
 			{
+				// libgit2 calls back again after the server rejects a credential. We offer one per
+				// operation; a second request means it was refused, so stop instead of looping.
+				if (Payload != nullptr && Payload->CredentialAttempts > 0)
+				{
+					Payload->bCredentialRejected = true;
+					return GIT_EUSER;
+				}
+
+				if (Payload != nullptr && Payload->Credentials != nullptr && *Payload->Credentials)
+				{
+					++Payload->CredentialAttempts;
+
+					FString User;
+					FString Pass;
+					if ((*Payload->Credentials)(InUrl ? FString(UTF8_TO_TCHAR(InUrl)) : FString(), User, Pass))
+					{
+						return git_credential_userpass_plaintext_new(OutCred, TCHAR_TO_UTF8(*User), TCHAR_TO_UTF8(*Pass));
+					}
+				}
+
+				// No credential available: let the transport try anonymously (public remotes).
 				*OutCred = nullptr;
 				return GIT_PASSTHROUGH;
 			}
@@ -229,6 +256,7 @@ namespace gitlink::op
 		FCallbackPayload Payload;
 		Payload.UserProgress = MoveTemp(InProgress);
 		Payload.Stage        = TEXT("Fetching");
+		Payload.Credentials  = InParams.Credentials ? &InParams.Credentials : nullptr;
 
 		git_fetch_options Opts;
 		if (const int32 Rc = git_fetch_options_init(&Opts, GIT_FETCH_OPTIONS_VERSION); Rc < 0)
@@ -246,6 +274,13 @@ namespace gitlink::op
 		{
 			if (Payload.bCancelRequested)
 			{ return FResult::Fail(TEXT("FetchRemote: cancelled by progress callback")); }
+
+			if (Payload.bCredentialRejected)
+			{
+				return FResult::Fail(FString::Printf(
+					TEXT("Fetch from '%s' failed: the remote rejected the credential from git's credential helper. ")
+					TEXT("Check that `git fetch` works from a terminal."), *RemoteName));
+			}
 
 			return libgit2::MakeFailResult(TEXT("FetchRemote: git_remote_fetch"), Rc);
 		}
