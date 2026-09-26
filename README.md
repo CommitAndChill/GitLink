@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 0.6.0" src="https://img.shields.io/badge/version-0.6.0-00bde8">
+  <img alt="Version 0.7.0" src="https://img.shields.io/badge/version-0.7.0-00bde8">
   <img alt="Beta" src="https://img.shields.io/badge/status-beta-246bfe">
   <img alt="Windows 64-bit" src="https://img.shields.io/badge/platform-Win64-08204f">
   <a href="LICENSE.md"><img alt="License" src="https://img.shields.io/badge/license-see%20LICENSE-ffffff"></a>
@@ -25,17 +25,19 @@ GitLink is an editor-native Git provider built for Unreal projects. It brings ev
 - **Use familiar editor actions.** Refresh, Pull, Push, Revert, history, and revision diff are integrated with Unreal's source-control UI, with convenient toolbar actions for common repository-wide operations.
 - **Keep submodule-heavy projects usable.** Status, history, diff, staging, commits, and LFS operations are routed to the repository that owns each file—including initialized Git submodules.
 - **Stay current automatically.** Background polling refreshes repository and lock state, while saves and editor activity trigger faster updates for the files you are actively using.
-- **Respect repository hooks.** GitLink can fall back to the Git executable for supported hooked commit and push operations.
+- **Respect repository hooks.** When the repository has `pre-commit` / `commit-msg` hooks (including via `core.hooksPath`), commits go through the Git executable so the hooks run. Push always uses the Git executable.
+- **Fast on big projects.** Status, history and staging run in-process through libgit2 instead of spawning `git` for every query, and lock state is polled over a pooled HTTPS connection. See [Benchmarks](Docs/BENCHMARKS.md).
 
 ## Requirements
 
 | Requirement | Why it is needed |
 |---|---|
-| Unreal Engine 5 project with C++ build support | GitLink is a source plugin and must be compiled for your editor build. |
+| Unreal Engine 5 project with C++ build support | GitLink is a source plugin and must be compiled for your editor build. Developed and tested on **UE 5.7**; the code keeps compatibility guards back to 5.1, but earlier versions are not regularly built. |
 | Windows 64-bit | The included libgit2 v1.9.0 binaries currently target Win64. |
-| Git available on `PATH` | Used for filter-aware staging and selected fallback operations. |
+| Git available on `PATH` | Used for filter-aware staging, push, hooked commits, and to read credentials from your credential helper. |
 | Git LFS available on `PATH` | Required for LFS locking and correct handling of LFS-managed files. |
 | An existing Git working tree | GitLink connects to your project repository; it does not initialize or clone one. |
+| An HTTPS remote | Fetch and pull run through libgit2, which is built without SSH support. Push and LFS use the Git executable and work with any remote Git can reach. |
 
 ## 📦 Installation
 
@@ -108,18 +110,51 @@ The **Project Settings → Editor → GitLink** page provides:
 - automatic repository discovery or an explicit repository-root override;
 - background fetch/status polling and its interval;
 - Git LFS file locking;
-- fallback to the Git executable when supported repository hooks are present; and
+- running commits through the Git executable when commit hooks are present;
+- Windows integrated authentication (NTLM / Kerberos) for intranet servers — off by default; and
 - an optional explicit path to the Git executable.
+
+Console variable: `r.GitLink.LfsHttp 0` makes lock polling use the `git lfs locks` command instead of GitLink's in-process HTTPS client (useful to rule the client out when diagnosing lock issues).
 
 The provider connection panel also reports the detected repository root, branch, remote, Git identity, LFS availability, backend, and GitLink version.
 
 ## Current scope and limitations
 
 - GitLink is an editor integration, not a complete replacement for every Git command. Use your normal Git client for branching, rebasing, conflict-heavy merges, repository setup, and history rewriting.
-- The View Changes workflow intentionally models two groups: **Working** and **Staged**. It does not implement arbitrary named Git changelists.
-- Pull supports fast-forward updates; it does not perform an automatic merge or rebase.
+- The View Changes workflow intentionally models two groups: **Working** and **Staged**. Creating named changelists is not supported (the editor reports an error).
+- Pull supports fast-forward updates only; if your branch has diverged it stops and tells you to merge or rebase from a Git client.
+- Pull and Push act on the project repository only. Submodules are shown, staged, committed, locked and diffed correctly, but must be pulled / pushed with a Git client.
+- Fetch and pull need an HTTPS remote (see Requirements). Remotes other than the one your branch tracks are not used.
+- The editor's "not at latest revision" warning is not raised; run Pull before editing shared assets.
+- Copy (duplicate-with-history) and Annotate (blame) are not implemented.
 - Only Win64 ships with a ready-to-use libgit2 backend today. The module can compile without the backend, but the provider then disables itself at startup.
 - LFS operations depend on the repository's remote, authentication, `.gitattributes`, and local Git LFS installation being configured correctly.
+
+## Migrating from Git LFS 2 (Project Borealis) or Epic's Git plugin
+
+1. Close the editor. If your project contains `Plugins/GitSourceControl` (the Git LFS 2 plugin), disable it in your `.uproject` (`"Name": "GitSourceControl", "Enabled": false`) or remove the folder. It can stay installed, but only one provider is active at a time and it still loads at startup.
+2. Add GitLink as described above and enable it.
+3. In **Revision Control → Connect to Revision Control**, choose **GitLink**. This writes `Provider=GitLink` to `Saved/Config/WindowsEditor/SourceControlSettings.ini`.
+4. Old `[GitSourceControl.GitSourceControlSettings]` sections in that file are ignored and can be deleted. Equivalent settings live under **Project Settings → Editor → GitLink**: *Use LFS File Locking* replaces Git LFS 2's LFS-locking checkbox, and *git Binary Override* replaces its Git path.
+5. Your repository, `.gitattributes` and existing LFS locks need no changes — GitLink uses the same Git LFS lock API.
+
+## Troubleshooting
+
+- **See what GitLink is doing:** run `Log LogGitLink Verbose` (and `Log LogGitLinkCore Verbose`) in the editor console, or add `-LogCmds="LogGitLink Verbose"` to the command line. Every command logs its outcome.
+- **Pull / fetch fails with an authentication error:** GitLink uses the credentials from your Git credential helper, non-interactively. Run `git fetch` once from a terminal in the project folder; if that prompts or fails, fix it there and GitLink will pick it up.
+- **Lock state looks wrong:** compare with `git lfs locks --verify`. Setting `r.GitLink.LfsHttp 0` switches polling to that command, which isolates GitLink's HTTPS client from the question.
+- **"Check Out needs the git command-line tool":** install Git and Git LFS, make sure `git` is on `PATH` (or set *git Binary Override*), and restart the editor.
+- **Hooks not running on Check In:** hooks are detected at connect (including `core.hooksPath`); reconnect after adding them.
+
+When reporting a problem, include the GitLink version from the log line `GitLink vX.Y.Z`, your engine version, `git --version`, `git lfs version`, and the relevant `LogGitLink` lines.
+
+## Documentation
+
+- [CHANGELOG.md](CHANGELOG.md) — what changed in each version.
+- [Docs/BENCHMARKS.md](Docs/BENCHMARKS.md) — performance compared with the Git LFS 2 and Epic Git plugins, with the method to reproduce it.
+- [ROADMAP.md](ROADMAP.md) — known gaps and planned work.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — building, testing and submitting changes.
+- [SECURITY.md](SECURITY.md) — reporting vulnerabilities and how credentials are handled.
 
 ## For contributors
 
@@ -127,10 +162,10 @@ GitLink is split into two primary modules:
 
 | Module | Type | Purpose |
 |---|---|---|
-| `GitLinkCore` | Runtime | A focused C++ facade over libgit2 with no Unreal source-control types. |
+| `GitLinkCore` | UncookedOnly | A focused C++ facade over libgit2 with no Unreal source-control types. |
 | `GitLink` | UncookedOnly | The Unreal source-control provider, async command dispatcher, menus, settings, and editor integration. |
 
-`GitLinkTests` contains the automation coverage. The vendored backend lives under `Source/ThirdParty/libgit2/`; see its [build notes](Source/ThirdParty/libgit2/README.md) when updating or porting libgit2.
+`GitLinkTests` contains the automation coverage (see [CONTRIBUTING.md](CONTRIBUTING.md) for how to run it). The vendored backend lives under `Source/ThirdParty/libgit2/`; see its [build notes](Source/ThirdParty/libgit2/README.md) when updating or porting libgit2.
 
 ## License
 
