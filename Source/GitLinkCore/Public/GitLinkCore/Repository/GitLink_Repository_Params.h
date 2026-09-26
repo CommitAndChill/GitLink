@@ -59,6 +59,11 @@ namespace gitlink
 		// Credentials for HTTPS remotes that require authentication. Unset = none offered, and any private HTTPS
 		// remote fails with 401 (libgit2 has no credential store of its own).
 		FCredentialProvider Credentials;
+
+		// Answer an NTLM / Negotiate challenge with the signed-in Windows account. Off by default: any server can
+		// issue that challenge, so enabling it hands the account's NTLM response to whatever remote asks. Needed
+		// only for intranet servers using Windows integrated authentication.
+		bool bAllowDefaultCredentials = false;
 	};
 
 	// --------------------------------------------------------------------------------------------------------------------
