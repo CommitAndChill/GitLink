@@ -542,7 +542,7 @@ auto FGitLink_Provider::CheckRepositoryStatus() -> void
 	// Probe for git hooks so we know whether to route commits through the subprocess.
 	if (Settings != nullptr && Settings->bSubprocessFallbackForHooks)
 	{
-		const FGitLink_HookFlags HookFlags = FGitLink_HookProbe::Probe(Snap.PathToRepositoryRoot);
+		const FGitLink_HookFlags HookFlags = FGitLink_HookProbe::Probe(Snap.PathToRepositoryRoot, _Subprocess.Get());
 		_bHasPreCommitOrCommitMsgHook = HookFlags.NeedsSubprocessForCommit();
 	}
 
