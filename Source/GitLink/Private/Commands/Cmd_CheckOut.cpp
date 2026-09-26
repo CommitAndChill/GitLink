@@ -32,7 +32,7 @@ namespace gitlink::cmd
 		if (InCtx.Subprocess == nullptr || !InCtx.Subprocess->IsValid())
 		{
 			return FCommandResult::Fail(LOCTEXT("NoGit",
-				"GitLink: CheckOut requires git.exe via subprocess, which is not configured."));
+				"GitLink: Check Out needs the git command-line tool, which was not found. Install git (and git-lfs) or set the git binary path in GitLink settings."));
 		}
 
 		if (!InCtx.Provider.Is_LfsAvailable())
