@@ -7,7 +7,7 @@
 #define LOCTEXT_NAMESPACE "GitLinkCmdFetch"
 
 // --------------------------------------------------------------------------------------------------------------------
-// Cmd_Fetch — git fetch origin. Updates remote-tracking refs without touching the working tree.
+// Cmd_Fetch — git fetch <the current branch's tracked remote, else origin>. Updates remote-tracking refs without touching the working tree.
 // Used by the editor's "Check for updates" button and by FGitLink_BackgroundPoll on an interval.
 // --------------------------------------------------------------------------------------------------------------------
 
@@ -24,10 +24,9 @@ namespace gitlink::cmd
 				"GitLink: cannot fetch — repository not open."));
 		}
 
-		UE_LOG(LogGitLink, Log, TEXT("Cmd_Fetch: fetching from 'origin'"));
+		UE_LOG(LogGitLink, Log, TEXT("Cmd_Fetch: fetching from the tracked remote"));
 
-		gitlink::FFetchParams Params;
-		Params.RemoteName = TEXT("origin");
+		const gitlink::FFetchParams Params;  // empty RemoteName = the branch's tracked remote
 
 		const FResult FetchRes = InCtx.Repository->Fetch(Params, /*InProgress=*/ nullptr);
 		if (!FetchRes)
@@ -40,7 +39,7 @@ namespace gitlink::cmd
 		UE_LOG(LogGitLink, Log, TEXT("Cmd_Fetch: fetch complete"));
 
 		FCommandResult Result = FCommandResult::Ok();
-		Result.InfoMessages.Add(LOCTEXT("FetchOk", "Fetched from 'origin'."));
+		Result.InfoMessages.Add(LOCTEXT("FetchOk", "Fetched from the tracked remote."));
 		return Result;
 	}
 }
