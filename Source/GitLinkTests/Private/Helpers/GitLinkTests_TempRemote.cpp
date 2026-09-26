@@ -86,11 +86,11 @@ namespace gitlink::tests
 		return true;
 	}
 
-	auto FTempRemote::Clone(const FString& InName) -> FString
+	auto FTempRemote::Clone(const FString& InName, const FString& InUrl) -> FString
 	{
 		const FString Root = FPaths::Combine(_Base, InName);
 		const bool bOk =
-			Git(_Base, { TEXT("clone"), _BareRoot, Root }).IsSuccess()
+			Git(_Base, { TEXT("clone"), InUrl.IsEmpty() ? _BareRoot : InUrl, Root }).IsSuccess()
 			&& Git(Root, { TEXT("config"), TEXT("user.name"),  InName }).IsSuccess()
 			&& Git(Root, { TEXT("config"), TEXT("user.email"), InName + TEXT("@example.invalid") }).IsSuccess();
 

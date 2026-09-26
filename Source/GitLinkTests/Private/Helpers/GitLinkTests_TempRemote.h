@@ -43,8 +43,8 @@ namespace gitlink::tests
 		auto Get_BareRoot() const -> const FString& { return _BareRoot; }
 
 		// Clones the remote into <base>/<InName> with a test identity configured. Returns the clone's absolute root,
-		// or empty on failure.
-		auto Clone(const FString& InName) -> FString;
+		// or empty on failure. InUrl overrides the source (a real remote, for the opt-in live tests).
+		auto Clone(const FString& InName, const FString& InUrl = FString()) -> FString;
 
 		// Opens a clone (or any repo root) through GitLinkCore.
 		static auto Open(const FString& InRoot) -> TUniquePtr<gitlink::FRepository>;
