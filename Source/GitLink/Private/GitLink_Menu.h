@@ -41,7 +41,7 @@ private:
 	static auto Display_InProgressNotification(const FText& InText) -> void;
 	static auto Remove_InProgressNotification() -> void;
 	static auto Display_SuccessNotification(const FName& InOpName) -> void;
-	static auto Display_FailureNotification(const FName& InOpName) -> void;
+	static auto Display_FailureNotification(const FName& InOpName, const FString& InDetail = FString()) -> void;
 
 	static TWeakPtr<class SNotificationItem> _OperationInProgressNotification;
 };
