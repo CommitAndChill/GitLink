@@ -1,24 +1,28 @@
 # GitLink Roadmap
 
-Tasks remaining after v1.0. Each task below is self-contained and can be handed to a separate agent. Branches should be created off `main` and merged via PR.
+Known gaps and planned work. Each task is self-contained. Branch off `main`, and merge through a pull request.
 
-## Current Status
+## Current status (v0.7.0)
 
-```
-                                        [dev/auto-refresh-and-toolbar]
-                                                      │
-                                                      ▼
-                 ┌─────────────────────┬──────────────────────┐
-  main ──────────┤ 0: untracked fix    │ 1: auto-refresh      │
-  (v1.0)         │    (merged)         │ 2: toolbar buttons   │
-                 │ T1: lockable probe  │ 3: lockable hardening│
-                 │    hardening (done) │                      │
-                 └─────────────────────┴──────────────────────┘
-```
+**Shipped:** libgit2-backed provider; Git LFS locking with in-process lock polling; Working/Staged changelists;
+Check Out / Check In / Revert / Mark for Add / Delete / Pull (fast-forward) / Fetch; history and diff; submodule
+routing for status, staging, commits, locks, history and diff; toolbar Push / Pull / Revert All / Refresh; hook
+detection (including `core.hooksPath`); private-remote authentication through the Git credential helper;
+automated tests including a local-remote suite and opt-in live tests.
 
-**Shipped (main):** libgit2-backed SCC provider, LFS locking, Working/Staged changelists, CheckOut/CheckIn/Revert/MarkForAdd/Delete/Sync/Fetch, history, submodule handling, remote lock polling, command logging, untracked-file checkout fix.
+## Open work, roughly by priority
 
-**Pending merge (dev/auto-refresh-and-toolbar):** View Changes auto-refresh on save + working-tree-modifying ops, 4 toolbar buttons (Push/Pull/Revert All/Refresh), `ProbeLockableExtensions` hardening + diagnostics (Task 1 — no bug found, parser made robust against trailing whitespace / CRLF, raw stdout logged at Verbose).
+| # | Gap | Notes |
+|---|---|---|
+| A | **SSH remotes for Pull / Fetch** | libgit2 is built without SSH, so Pull/Fetch need HTTPS. Either build libgit2 with libssh2, or run fetch through the Git executable for non-HTTPS remotes. Push already uses Git. |
+| B | **Pull / Push for submodules** | Sync and Push act on the parent repository only. Needs per-submodule fetch + fast-forward and a push of submodules before the parent pointer. |
+| C | **Conflict resolution** — Task 3 | Pull refuses non-fast-forward; Resolve only stages what is on disk. |
+| D | **"Not at latest revision"** | `EGitLink_RemoteState::NotAtHead` is never computed, so the editor's "someone changed this upstream" warning never fires. The background fetch already updates remote-tracking refs; compare HEAD vs upstream per file. |
+| E | **Named changelists** — Task 2 | Currently reported as unsupported. |
+| F | **Timeouts on LFS subprocesses** | `FGitLink_Subprocess::Run` (git lfs lock / unlock / pull) has no timeout; git-lfs's own network timeouts bound it in practice, but a credential helper waiting on UI would not be. Route through `Run_Bounded`. |
+| G | **Mac / Linux** — Task 6 | Win64-only libgit2 today. |
+| H | **Copy and Annotate** | Copy (duplicate with history) is a no-op; Annotate (blame) is a stub. |
+| I | Stash (Task 4), dynamic poll interval (Task 8) | Nice to have. |
 
 ---
 
@@ -175,9 +179,7 @@ Revision Control Menu
 
 ## Task 5 — Unit Tests (GitLinkTests module) ✅ DONE
 
-**Status:** Completed 2026-04-17 on branch `dev/tests`. 11 suites across 5 files, all green in `Window → Developer Tools → Session Frontend → Automation` under `GitLink.Repository.*`. Scaffolding lives at `Source/GitLinkTests/` — new suites just drop a file into `Private/Tests/`.
-
-**Priority:** Medium. No tests currently = no regression safety net for future changes.
+**Status:** Done, and extended since: ~85 tests as of v0.7.0 (see [CONTRIBUTING.md](CONTRIBUTING.md) for the suite map). The original design notes are kept below. New suites just drop a file into `Source/GitLinkTests/Private/Tests/`.
 
 **Design:** Add a third module `GitLinkTests` using UE's Automation Framework.
 
@@ -210,7 +212,7 @@ Revision Control Menu
 - `Source/GitLinkTests/Private/Helpers/GitLinkTests_TempRepo.h` / `.cpp` — libgit2-backed ephemeral repo under `Saved/GitLinkTests/<guid>/`, seeds `user.name` / `user.email` in the repo's local config so commits can fall through to `default_signature`.
 - `Source/GitLinkTests/Private/Tests/Test_Repository_Status.cpp` / `_Staging.cpp` / `_Commit.cpp` / `_Branches.cpp` / `_Submodules.cpp` — 11 suites total.
 
-**Uplugin:** `GitLinkTests` added as `Type: UncookedOnly, LoadingPhase: Default`. (`DeveloperTool` isn't a valid UE module Type — `UncookedOnly` matches the existing convention in `GitLink.uplugin` and is also editor-only.)
+**Uplugin:** `GitLinkTests` added as `Type: UncookedOnly, LoadingPhase: Default`.
 
 **Acceptance:**
 - `Window → Developer Tools → Session Frontend → Automation` shows `GitLink.*` tests. *(Verified by running the editor once and expanding the tree.)*
@@ -245,7 +247,7 @@ switch (Target.Platform)
 
 ---
 
-## Task 7 — Staging-on-save (optional, mirrors old plugin)
+## Task 7 — Staging-on-save — implemented, needs a test
 
 **Priority:** Low. Would surprise users who don't expect auto-staging.
 
@@ -263,25 +265,19 @@ switch (Target.Platform)
 
 **Priority:** Low. Cosmetic improvement.
 
-**What:** Shorten the 30s background poll interval when View Changes is open, restore it when closed. Reduces staleness for users who keep the window open.
+**What:** Shorten the background poll interval (default 120 s) when View Changes is open, restore it when closed. Reduces staleness for users who keep the window open.
 
 **Approach:** Hook the View Changes window's visibility (via Slate tab manager) and call `_BackgroundPoll->SetInterval(5.f)` / `SetInterval(30.f)`.
 
 **Files:** Would need a new `GitLink_ViewChangesWatcher.cpp` plus a provider lifetime hook.
 
-**Acceptance:** With View Changes open, the poll log shows `(every 5 seconds)`. Close the window, log shows `(every 30 seconds)`.
+**Acceptance:** With View Changes open, the poll log shows `(every 5 seconds)`. Close the window, log shows the configured interval again.
 
 ---
 
-## Suggested Sequencing
+## Suggested sequencing
 
-```
-Week 1:  Task 1 (lockable_exts investigation)   ✅ DONE
-Week 2:  Task 5 (GitLinkTests module)           ✅ DONE
-Week 3:  Task 3 (conflict resolution — user-facing, medium scope)
-Week 4:  Task 2 (named changelists — new feature, medium scope)
-Later:   Tasks 4, 6, 7, 8 (lower priority / optional)
-```
+Work the table at the top from A downward; A–D are the gaps users are most likely to hit.
 
 ---
 
@@ -289,6 +285,6 @@ Later:   Tasks 4, 6, 7, 8 (lower priority / optional)
 
 1. Branch off `main`: `git checkout -b dev/<task-slug>` (e.g., `dev/lockable-exts-fix`).
 2. Implement changes per the task's acceptance criteria.
-3. Build with `"<EnginePath>/Engine/Build/BatchFiles/Build.bat" <Project>Editor Win64 Development "<Project>.uproject" -waitmutex`.
-4. Test manually per the task's acceptance section.
+3. Build and run the `GitLink` automation tests as described in [CONTRIBUTING.md](CONTRIBUTING.md); add tests for the new behaviour.
+4. Check the task's acceptance criteria in the editor.
 5. Open a PR to `main`.
