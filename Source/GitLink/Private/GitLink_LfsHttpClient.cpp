@@ -42,6 +42,12 @@ namespace
 	constexpr int32  kDefault429BackoffSec     = 60;    // used when Retry-After is missing / non-numeric
 	constexpr int32  kMaxBackoffSec            = 3600;  // cap absurd Retry-After values
 
+	// A credential the server rejected twice in a row (the cached one, then a fresh `git credential
+	// fill`) will keep being rejected: the helper hands back the same thing. Back off instead of paying
+	// a helper spawn + two 401s on every sweep and probe. We deliberately do NOT `git credential reject`
+	// — erasing a user's stored credential is too destructive to do from a background poll.
+	constexpr int32  kAuthRejectedBackoffSec   = 600;
+
 	// Strip a trailing slash so we can append "/locks/verify" cleanly.
 	auto StripTrailingSlash(FString InUrl) -> FString
 	{
@@ -726,7 +732,7 @@ auto FGitLink_LfsHttpClient::Request_LocksVerify(const FString& InRepoRoot)
 	if (Is_HostInBackoff(Endpoint.HostKey))
 	{
 		UE_LOG(LogGitLink, Verbose,
-			TEXT("LfsHttpClient: skipping '%s' — host in 429 backoff, caller should fall back"),
+			TEXT("LfsHttpClient: skipping '%s' — host in backoff (429 or rejected credential), caller should fall back"),
 			*Endpoint.HostKey);
 		return Out;
 	}
@@ -771,6 +777,17 @@ auto FGitLink_LfsHttpClient::Request_LocksVerify(const FString& InRepoRoot)
 			if (AuthHeader.IsEmpty())
 			{ break; }
 			continue;
+		}
+
+		if (HttpStatus == 401)
+		{
+			Invalidate_CredentialForHost(Endpoint.HostKey);
+			Set_HostBackoff(Endpoint.HostKey, kAuthRejectedBackoffSec);
+			UE_LOG(LogGitLink, Warning,
+				TEXT("LfsHttpClient: '%s' rejected the credential from git's credential helper twice — pausing ")
+				TEXT("in-process lock queries for %d s. Check that `git lfs locks` works from a terminal."),
+				*Endpoint.HostKey, kAuthRejectedBackoffSec);
+			break;
 		}
 
 		if (!Page.bSuccess)
@@ -1046,6 +1063,13 @@ auto FGitLink_LfsHttpClient::Request_SingleFileLock(
 			if (AuthHeader.IsEmpty())
 			{ return Out; }
 			continue;
+		}
+
+		if (HttpStatus == 401)
+		{
+			Invalidate_CredentialForHost(Endpoint.HostKey);
+			Set_HostBackoff(Endpoint.HostKey, kAuthRejectedBackoffSec);
+			return Out;
 		}
 
 		break;
