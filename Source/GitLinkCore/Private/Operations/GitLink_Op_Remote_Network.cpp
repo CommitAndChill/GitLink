@@ -50,6 +50,7 @@ namespace gitlink::op
 			const FCredentialProvider* Credentials         = nullptr;
 			int32                      CredentialAttempts  = 0;
 			bool                       bCredentialRejected = false;
+			bool                       bNoCredentialAvailable = false;   // provider consulted, had nothing
 			bool                       bAllowDefaultCredentials = false;   // FFetchParams::bAllowDefaultCredentials
 		};
 
@@ -103,6 +104,7 @@ namespace gitlink::op
 					{
 						return git_credential_userpass_plaintext_new(OutCred, TCHAR_TO_UTF8(*User), TCHAR_TO_UTF8(*Pass));
 					}
+					Payload->bNoCredentialAvailable = true;
 				}
 
 				// No credential available: let the transport try anonymously (public remotes).
@@ -276,6 +278,13 @@ namespace gitlink::op
 		{
 			if (Payload.bCancelRequested)
 			{ return FResult::Fail(TEXT("FetchRemote: cancelled by progress callback")); }
+
+			if (Payload.bNoCredentialAvailable)
+			{
+				return FResult::Fail(FString::Printf(
+					TEXT("Fetch from '%s' failed: the remote requires a login and git's credential helper has no ")
+					TEXT("stored credential for it. Run `git fetch` once from a terminal to sign in, then retry."), *RemoteName));
+			}
 
 			if (Payload.bCredentialRejected)
 			{
