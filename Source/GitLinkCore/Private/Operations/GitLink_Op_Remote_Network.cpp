@@ -50,6 +50,7 @@ namespace gitlink::op
 			const FCredentialProvider* Credentials         = nullptr;
 			int32                      CredentialAttempts  = 0;
 			bool                       bCredentialRejected = false;
+			bool                       bAllowDefaultCredentials = false;   // FFetchParams::bAllowDefaultCredentials
 		};
 
 		// "scheme://user:secret@host/path" -> "scheme://host/path", for logging only.
@@ -109,9 +110,9 @@ namespace gitlink::op
 				return GIT_PASSTHROUGH;
 			}
 
-			// Default credential flow (NTLM / Negotiate on Windows with WinHTTP) is preferred for
-			// intranet HTTPS servers that expect integrated Windows auth.
-			if ((InAllowedTypes & GIT_CREDENTIAL_DEFAULT) != 0)
+			// Default credential flow (NTLM / Negotiate with the signed-in Windows account) — only when the
+			// caller opted in, because any server can ask for it (see FFetchParams::bAllowDefaultCredentials).
+			if ((InAllowedTypes & GIT_CREDENTIAL_DEFAULT) != 0 && Payload != nullptr && Payload->bAllowDefaultCredentials)
 			{
 				return git_credential_default_new(OutCred);
 			}
@@ -257,6 +258,7 @@ namespace gitlink::op
 		Payload.UserProgress = MoveTemp(InProgress);
 		Payload.Stage        = TEXT("Fetching");
 		Payload.Credentials  = InParams.Credentials ? &InParams.Credentials : nullptr;
+		Payload.bAllowDefaultCredentials = InParams.bAllowDefaultCredentials;
 
 		git_fetch_options Opts;
 		if (const int32 Rc = git_fetch_options_init(&Opts, GIT_FETCH_OPTIONS_VERSION); Rc < 0)

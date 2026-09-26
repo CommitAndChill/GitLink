@@ -51,6 +51,12 @@ public:
 	UPROPERTY(config, EditAnywhere, Category="GitLink|LFS", meta=(DisplayName="Use LFS File Locking"))
 	bool bUseLfsLocking = true;
 
+	/** Answer NTLM / Kerberos challenges during fetch and pull with your signed-in Windows account. Only needed for
+	 *  intranet git servers that use Windows integrated authentication; leave off otherwise, since any server could
+	 *  request it. (GitHub, GitLab, Azure DevOps and Bitbucket use the credential helper instead.) */
+	UPROPERTY(config, EditAnywhere, Category="GitLink", meta=(DisplayName="Allow Windows Integrated Authentication"))
+	bool bAllowWindowsIntegratedAuth = false;
+
 	/** Path to the git executable used for LFS, push and hooked commits. Leave empty to find git on PATH. */
 	UPROPERTY(config, EditAnywhere, Category="GitLink", meta=(DisplayName="git Binary Override"))
 	FString GitBinaryOverride;
