@@ -123,7 +123,7 @@ auto FGitLink_FileState::GetResolveInfo() const -> FResolveInfo
 }
 #endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2
+#if !UE_VERSION_OLDER_THAN(5, 2, 0)
 auto FGitLink_FileState::GetCurrentRevision() const
 	-> TSharedPtr<ISourceControlRevision, ESPMode::ThreadSafe>
 {

@@ -5,7 +5,7 @@
 
 #include <CoreMinimal.h>
 #include <ISourceControlState.h>
-#include <Runtime/Launch/Resources/Version.h>
+#include <Misc/EngineVersionComparison.h>
 
 // --------------------------------------------------------------------------------------------------------------------
 // Per-file state tracked by the GitLink provider.
@@ -132,7 +132,7 @@ public:
 	auto GetResolveInfo() const -> FResolveInfo override;
 #endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2
+#if !UE_VERSION_OLDER_THAN(5, 2, 0)
 	auto GetCurrentRevision() const -> TSharedPtr<ISourceControlRevision, ESPMode::ThreadSafe> override;
 #endif
 
@@ -185,7 +185,7 @@ public:
 	FGitLink_Changelist     _Changelist;      ///< Which changelist this file belongs to (Working or Staged).
 	FDateTime               _TimeStamp = FDateTime(0); ///< When this state was last refreshed.
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+#if !UE_VERSION_OLDER_THAN(5, 3, 0)
 	FResolveInfo            _PendingResolveInfo;
 #endif
 	FString                 _PendingMergeBaseFileHash;

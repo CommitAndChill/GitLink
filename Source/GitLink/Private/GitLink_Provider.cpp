@@ -1250,7 +1250,7 @@ auto FGitLink_Provider::UsesCheckout() const -> bool
 	return bUserEnabled && _bLfsAvailable;
 }
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+#if !UE_VERSION_OLDER_THAN(5, 1, 0)
 auto FGitLink_Provider::UsesFileRevisions() const -> bool
 {
 	return true;
@@ -1278,13 +1278,13 @@ auto FGitLink_Provider::GetNumLocalChanges() const -> TOptional<int>
 }
 #endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2
+#if !UE_VERSION_OLDER_THAN(5, 2, 0)
 auto FGitLink_Provider::AllowsDiffAgainstDepot     () const -> bool { return true;  }
 auto FGitLink_Provider::UsesUncontrolledChangelists() const -> bool { return false; }
 auto FGitLink_Provider::UsesSnapshots              () const -> bool { return false; }
 #endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+#if !UE_VERSION_OLDER_THAN(5, 3, 0)
 auto FGitLink_Provider::CanExecuteOperation(const FSourceControlOperationRef& /*InOperation*/) const -> bool
 {
 	return _bGitRepositoryFound;
