@@ -7,9 +7,9 @@
 	"Category": "Source Control",
 	"CreatedBy": "Chainkemists",
 	"CreatedByURL": "",
-	"DocsURL": "",
+	"DocsURL": "https://github.com/CommitAndChill/GitLink#readme",
 	"MarketplaceURL": "",
-	"SupportURL": "",
+	"SupportURL": "https://github.com/CommitAndChill/GitLink/issues",
 	"CanContainContent": false,
 	"IsBetaVersion": true,
 	"IsExperimentalVersion": false,
@@ -18,32 +18,26 @@
 	"Modules": [
 		{
 			"Name": "GitLinkCore",
-			"Type": "Runtime",
+			"Type": "UncookedOnly",
 			"LoadingPhase": "Default",
-			"WhitelistPlatforms": [
-				"Win64",
-				"Mac",
-				"Linux"
+			"PlatformAllowList": [
+				"Win64"
 			]
 		},
 		{
 			"Name": "GitLink",
 			"Type": "UncookedOnly",
 			"LoadingPhase": "Default",
-			"WhitelistPlatforms": [
-				"Win64",
-				"Mac",
-				"Linux"
+			"PlatformAllowList": [
+				"Win64"
 			]
 		},
 		{
 			"Name": "GitLinkTests",
 			"Type": "UncookedOnly",
 			"LoadingPhase": "Default",
-			"WhitelistPlatforms": [
-				"Win64",
-				"Mac",
-				"Linux"
+			"PlatformAllowList": [
+				"Win64"
 			]
 		}
 	]
