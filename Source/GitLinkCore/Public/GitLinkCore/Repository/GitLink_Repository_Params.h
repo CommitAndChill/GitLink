@@ -39,6 +39,13 @@ namespace gitlink
 	};
 
 	// --------------------------------------------------------------------------------------------------------------------
+	// Supplies a username/password for an HTTPS remote URL — in practice from `git credential fill`, so libgit2 uses
+	// exactly the credentials the git command line would. Return false when no credential is available. May be called
+	// from a worker thread.
+	// --------------------------------------------------------------------------------------------------------------------
+	using FCredentialProvider = TFunction<bool(const FString& InUrl, FString& OutUsername, FString& OutPassword)>;
+
+	// --------------------------------------------------------------------------------------------------------------------
 	// Options for a fetch.
 	// --------------------------------------------------------------------------------------------------------------------
 	struct GITLINKCORE_API FFetchParams
@@ -48,6 +55,10 @@ namespace gitlink
 		// branch's upstream, so fetching any other remote would compare against a stale ref.
 		FString RemoteName;
 		bool    bPrune     = false;
+
+		// Credentials for HTTPS remotes that require authentication. Unset = none offered, and any private HTTPS
+		// remote fails with 401 (libgit2 has no credential store of its own).
+		FCredentialProvider Credentials;
 	};
 
 	// --------------------------------------------------------------------------------------------------------------------

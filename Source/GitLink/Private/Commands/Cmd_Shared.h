@@ -12,7 +12,10 @@
 #include <Misc/DateTime.h>
 #include <Misc/Paths.h>
 
+#include "GitLink_LfsHttpClient.h"
+
 #include "GitLinkCore/Repository/GitLink_Repository.h"
+#include "GitLinkCore/Repository/GitLink_Repository_Params.h"
 #include "GitLinkCore/Types/GitLink_Types.h"
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -538,5 +541,19 @@ namespace gitlink::cmd
 			FGitLink_CompositeState& State = OutCompositeByPath.FindOrAdd(AbsolutePath);
 			Merge_CompositeState(State, InBucket, Change);
 		}
+	}
+
+	// Credentials for libgit2 network operations (fetch / pull), sourced from `git credential fill` so libgit2
+	// authenticates with exactly what the git command line uses. Empty when there is no usable git binary.
+	inline auto Make_GitCredentialProvider(const TSharedPtr<FGitLink_Subprocess>& InSubprocess) -> gitlink::FCredentialProvider
+	{
+		if (!InSubprocess.IsValid() || !InSubprocess->IsValid())
+		{ return {}; }
+
+		return [GitBinary = InSubprocess->Get_GitBinary(), WorkingDir = InSubprocess->Get_WorkingDirectory()]
+			(const FString& InUrl, FString& OutUser, FString& OutPass) -> bool
+		{
+			return gitlink::lfs_http::detail::Fill_CredentialForUrl(GitBinary, WorkingDir, InUrl, OutUser, OutPass);
+		};
 	}
 }

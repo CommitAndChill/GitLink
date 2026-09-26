@@ -196,6 +196,28 @@ namespace gitlink::lfs_http::detail
 		return InUrl.Left(AuthorityStart) + Authority.Mid(AtPos + 1) + InUrl.Mid(AuthorityEnd);
 	}
 
+	auto Fill_CredentialForUrl(
+		const FString& InGitBinary, const FString& InWorkingDir, const FString& InUrl,
+		FString& OutUser, FString& OutPass) -> bool
+	{
+		const FString HostKey  = Get_HostKey(InUrl);
+		const FString HostPort = Get_HostPort(InUrl);
+		if (HostKey.IsEmpty() || HostPort.IsEmpty() || InGitBinary.IsEmpty())
+		{ return false; }
+
+		// Never hand a credential to a plain-http endpoint other than a local test server.
+		const bool bHttps = HostKey.StartsWith(TEXT("https://"));
+		if (!bHttps && !Is_LoopbackHostPort(HostPort))
+		{ return false; }
+
+		// `git credential fill` reads protocol + host (blank-line terminated) and prints username/password.
+		const FString Input = FString::Printf(TEXT("protocol=%s\nhost=%s\n\n"),
+			bHttps ? TEXT("https") : TEXT("http"), *HostPort);
+
+		const FString Output = Run_CredentialFill(InGitBinary, InWorkingDir, Input);
+		return !Output.IsEmpty() && Parse_CredentialOutput(Output, OutUser, OutPass);
+	}
+
 	auto Is_LoopbackHostPort(const FString& InHostPort) -> bool
 	{
 		FString Host = InHostPort;
@@ -454,27 +476,11 @@ auto FGitLink_LfsHttpClient::Get_BasicAuthHeader(const FString& InHostKey) -> FS
 		{ return *Cached; }
 	}
 
-	// Fill credential. `git credential fill` reads `protocol`, `host`, optional `path` from
-	// stdin, terminated by a blank line, and emits username/password on stdout.
-	const FString HostPort = gitlink::lfs_http::detail::Get_HostPort(InHostKey);
-	if (HostPort.IsEmpty())
-	{ return FString(); }
-
-	const FString Scheme = InHostKey.StartsWith(TEXT("https")) ? TEXT("https") : TEXT("http");
-	const FString Input = FString::Printf(
-		TEXT("protocol=%s\nhost=%s\n\n"),
-		*Scheme, *HostPort);
-
-	const FString Output = Run_CredentialFill(
-		_Subprocess.Get_GitBinary(),
-		_Subprocess.Get_WorkingDirectory(),
-		Input);
-	if (Output.IsEmpty())
-	{ return FString(); }
-
+	// `git credential fill` for the host — the same path libgit2 fetch uses (Fill_CredentialForUrl).
 	FString User;
 	FString Pass;
-	if (!gitlink::lfs_http::detail::Parse_CredentialOutput(Output, User, Pass))
+	if (!gitlink::lfs_http::detail::Fill_CredentialForUrl(
+		_Subprocess.Get_GitBinary(), _Subprocess.Get_WorkingDirectory(), InHostKey, User, Pass))
 	{
 		UE_LOG(LogGitLink, Verbose,
 			TEXT("LfsHttpClient: 'git credential fill' returned no usable credential for '%s'"),
