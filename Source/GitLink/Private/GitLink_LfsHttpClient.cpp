@@ -70,7 +70,9 @@ namespace
 		//                  PipeReadChild  = handle the CHILD reads from (its stdin, fed by us).
 		FProcHandle Proc = FPlatformProcess::CreateProc(
 			*InGitBinary,
-			TEXT("credential fill"),
+			// credential.interactive=never: this runs hidden and in the background, so a credential
+			// helper (e.g. Git Credential Manager) must fail fast instead of opening a login window.
+			TEXT("-c credential.interactive=never credential fill"),
 			/*bLaunchDetached=*/ false,
 			/*bLaunchHidden=*/ true,
 			/*bLaunchReallyHidden=*/ true,
@@ -163,9 +165,56 @@ namespace gitlink::lfs_http::detail
 		const FString Rest = InUrl.Mid(HostStart);
 		int32 SlashPos = INDEX_NONE;
 		Rest.FindChar(TEXT('/'), SlashPos);
-		const FString HostPort = SlashPos == INDEX_NONE ? Rest : Rest.Left(SlashPos);
+		FString HostPort = SlashPos == INDEX_NONE ? Rest : Rest.Left(SlashPos);
+
+		// Drop "user[:secret]@" — it must never reach the cache key, logs or the credential helper.
+		int32 AtPos = INDEX_NONE;
+		if (HostPort.FindLastChar(TEXT('@'), AtPos))
+		{ HostPort = HostPort.Mid(AtPos + 1); }
+		if (HostPort.IsEmpty())
+		{ return FString(); }
 
 		return FString::Printf(TEXT("%s://%s"), *Scheme, *HostPort);
+	}
+
+	auto Strip_UrlUserInfo(const FString& InUrl) -> FString
+	{
+		const int32 SchemeSep = InUrl.Find(TEXT("://"), ESearchCase::CaseSensitive);
+		if (SchemeSep == INDEX_NONE)
+		{ return InUrl; }
+
+		const int32 AuthorityStart = SchemeSep + 3;
+		int32 AuthorityEnd = InUrl.Find(TEXT("/"), ESearchCase::CaseSensitive, ESearchDir::FromStart, AuthorityStart);
+		if (AuthorityEnd == INDEX_NONE)
+		{ AuthorityEnd = InUrl.Len(); }
+
+		const FString Authority = InUrl.Mid(AuthorityStart, AuthorityEnd - AuthorityStart);
+		int32 AtPos = INDEX_NONE;
+		if (!Authority.FindLastChar(TEXT('@'), AtPos))
+		{ return InUrl; }
+
+		return InUrl.Left(AuthorityStart) + Authority.Mid(AtPos + 1) + InUrl.Mid(AuthorityEnd);
+	}
+
+	auto Is_LoopbackHostPort(const FString& InHostPort) -> bool
+	{
+		FString Host = InHostPort;
+		if (Host.StartsWith(TEXT("[")))
+		{
+			int32 Close = INDEX_NONE;
+			if (Host.FindChar(TEXT(']'), Close))
+			{ Host = Host.Left(Close + 1); }
+		}
+		else
+		{
+			int32 Colon = INDEX_NONE;
+			if (Host.FindChar(TEXT(':'), Colon))
+			{ Host = Host.Left(Colon); }
+		}
+
+		return Host.Equals(TEXT("localhost"), ESearchCase::IgnoreCase)
+			|| Host == TEXT("127.0.0.1")
+			|| Host == TEXT("[::1]");
 	}
 
 	auto Get_HostPort(const FString& InUrl) -> FString
@@ -325,18 +374,34 @@ auto FGitLink_LfsHttpClient::Resolve_LfsUrlForRepo(const FString& InRepoRoot, co
 		{
 			UE_LOG(LogGitLink, Verbose,
 				TEXT("LfsHttpClient: remote URL '%s' is not http(s) — falling back to subprocess for '%s'"),
-				*RemoteUrl, *InRepoRoot);
+				*gitlink::lfs_http::detail::Strip_UrlUserInfo(RemoteUrl), *InRepoRoot);
 			return false;
 		}
 
 		LfsUrl = StripTrailingSlash(RemoteUrl) + TEXT("/info/lfs");
 	}
 
+	// Credentials come from `git credential fill` for the host, never from the URL: dropping any
+	// embedded "user:token@" here keeps it out of every endpoint log and cache key downstream.
+	LfsUrl = gitlink::lfs_http::detail::Strip_UrlUserInfo(LfsUrl);
+
 	const FString HostKey = gitlink::lfs_http::detail::Get_HostKey(LfsUrl);
 	if (HostKey.IsEmpty())
 	{
 		UE_LOG(LogGitLink, Verbose,
 			TEXT("LfsHttpClient: could not derive host key from '%s' — falling back to subprocess for '%s'"),
+			*LfsUrl, *InRepoRoot);
+		return false;
+	}
+
+	// Basic auth over plain http would send the credential in the clear. Allow it only to a
+	// loopback host (local test servers); anything else takes the git-lfs subprocess path.
+	if (HostKey.StartsWith(TEXT("http://"))
+		&& !gitlink::lfs_http::detail::Is_LoopbackHostPort(gitlink::lfs_http::detail::Get_HostPort(HostKey)))
+	{
+		UE_LOG(LogGitLink, Verbose,
+			TEXT("LfsHttpClient: LFS URL '%s' is plain http — not sending credentials in-process; ")
+			TEXT("falling back to subprocess for '%s'"),
 			*LfsUrl, *InRepoRoot);
 		return false;
 	}
