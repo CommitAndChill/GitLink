@@ -5,7 +5,7 @@
 
 #include <CoreMinimal.h>
 #include <ISourceControlProvider.h>
-#include <Runtime/Launch/Resources/Version.h>
+#include <Misc/EngineVersionComparison.h>
 
 #include <atomic>
 
@@ -137,19 +137,19 @@ public:
 	auto UsesChangelists       () const -> bool override;
 	auto UsesCheckout          () const -> bool override;
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+#if !UE_VERSION_OLDER_THAN(5, 1, 0)
 	auto UsesFileRevisions  () const -> bool override;
 	auto IsAtLatestRevision () const -> TOptional<bool> override;
 	auto GetNumLocalChanges () const -> TOptional<int> override;
 #endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2
+#if !UE_VERSION_OLDER_THAN(5, 2, 0)
 	auto AllowsDiffAgainstDepot () const -> bool override;
 	auto UsesUncontrolledChangelists() const -> bool override;
 	auto UsesSnapshots() const -> bool override;
 #endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+#if !UE_VERSION_OLDER_THAN(5, 3, 0)
 	auto CanExecuteOperation(const FSourceControlOperationRef& InOperation) const -> bool override;
 	auto GetStatus() const -> TMap<EStatus, FString> override;
 #endif

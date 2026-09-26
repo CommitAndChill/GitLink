@@ -17,7 +17,7 @@
 #include <ToolMenus.h>
 #endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+#if !UE_VERSION_OLDER_THAN(5, 1, 0)
 #include <Styling/AppStyle.h>
 #else
 #include <EditorStyleSet.h>
@@ -107,7 +107,7 @@ auto FGitLink_Menu::AddMenuExtension(FToolMenuSection& Builder) -> void
 auto FGitLink_Menu::AddMenuExtension(FMenuBuilder& Builder) -> void
 #endif
 {
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+#if !UE_VERSION_OLDER_THAN(5, 1, 0)
 	const FName StyleSetName = FAppStyle::GetAppStyleSetName();
 #else
 	const FName StyleSetName = FEditorStyle::GetStyleSetName();
@@ -462,7 +462,7 @@ auto FGitLink_Menu::Display_SuccessNotification(const FName& InOpName) -> void
 
 	FNotificationInfo Info(Text);
 	Info.bUseSuccessFailIcons = true;
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+#if !UE_VERSION_OLDER_THAN(5, 1, 0)
 	Info.Image = FAppStyle::GetBrush(TEXT("NotificationList.SuccessImage"));
 #else
 	Info.Image = FEditorStyle::GetBrush(TEXT("NotificationList.SuccessImage"));

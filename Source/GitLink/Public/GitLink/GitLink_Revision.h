@@ -3,7 +3,7 @@
 #include <CoreMinimal.h>
 #include <ISourceControlRevision.h>
 #include <Misc/DateTime.h>
-#include <Runtime/Launch/Resources/Version.h>
+#include <Misc/EngineVersionComparison.h>
 
 // --------------------------------------------------------------------------------------------------------------------
 // FGitLink_Revision — thin ISourceControlRevision implementation backed by a commit hash and a

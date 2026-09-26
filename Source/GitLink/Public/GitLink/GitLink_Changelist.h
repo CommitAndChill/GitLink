@@ -2,7 +2,7 @@
 
 #include <CoreMinimal.h>
 #include <ISourceControlChangelist.h>
-#include <Runtime/Launch/Resources/Version.h>
+#include <Misc/EngineVersionComparison.h>
 
 // --------------------------------------------------------------------------------------------------------------------
 // GitLink "changelists" are virtual groupings on top of the git staging index, persisted in
@@ -30,7 +30,7 @@ public:
 	// ISourceControlChangelist ---------------------------------------------------------------------------------------
 	auto CanDelete() const -> bool override { return false; }
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+#if !UE_VERSION_OLDER_THAN(5, 3, 0)
 	auto IsDefault()    const -> bool    override { return _Name == WorkingChangelist._Name; }
 	auto GetIdentifier() const -> FString override { return _Name; }
 #endif
