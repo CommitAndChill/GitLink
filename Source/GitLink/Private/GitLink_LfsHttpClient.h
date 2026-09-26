@@ -88,7 +88,7 @@ public:
 
 	// The three repository facts endpoint resolution needs. Supplying them lets the caller read
 	// them from an already-open libgit2 handle instead of paying three `git` process spawns per
-	// repo — the difference between ~2.9 s and nothing measurable across BusterBlock's parent
+	// repo — the difference between ~2.9 s and nothing measurable across a parent
 	// repo plus 31 submodules, on the game thread, at connect.
 	//
 	// Field semantics match the subprocess commands they replace exactly. The two b*Known flags
@@ -137,7 +137,7 @@ public:
 	// Blocks the caller for up to ~10 s while the request completes.
 	auto Request_LocksVerify(const FString& InRepoRoot) -> FGitLink_Subprocess::FLfsLocksSnapshot;
 
-	// Stage B — single-file lock probe. Result of a synchronous `GET /locks?path=<rel>` query
+	// Single-file lock probe. Result of a synchronous `GET /locks?path=<rel>` query
 	// against the LFS server for the repo containing InAbsolutePath. Used by the editor-delegate
 	// path (focus / asset-opened / package-dirty) and the explicit-file-list pre-checkout path
 	// in Cmd_UpdateStatus to keep foreground freshness ≤2 s without paying the cross-repo sweep
@@ -193,7 +193,7 @@ private:
 		int32&                   OutHttpStatus,
 		int32&                   OutRetryAfterSec) -> FGitLink_Subprocess::FLfsLocksSnapshot;
 
-	// Stage B — single-file probe. Issues `GET <LfsUrl>/locks?path=<repo-relative URL-encoded>`
+	// Single-file probe. Issues `GET <LfsUrl>/locks?path=<repo-relative URL-encoded>`
 	// and parses the response. Returns the first lock entry (if any). Same status / retry-after
 	// out-params as PostVerify_Once.
 	auto Get_LocksByPath_Once(
@@ -230,7 +230,7 @@ private:
 	mutable FCriticalSection            _BackoffLock;
 	TMap<FString, double>               _BackoffUntilByHost;
 
-	// Stage B — LFS-server identity per host key. Learned lazily on the first successful
+	// LFS-server identity per host key. Learned lazily on the first successful
 	// /locks/verify response that included a non-empty `ours` array; the corresponding
 	// `owner.name` IS our LFS-server identity. Used by the single-file path to classify
 	// `Locked` vs `LockedOther` since /locks?path=... doesn't pre-classify.

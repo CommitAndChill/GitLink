@@ -15,7 +15,7 @@
 // Why this file exists: FGitLink_Provider::CheckRepositoryStatus resolves an LFS endpoint for the
 // parent repo plus EVERY submodule, on the game thread, during editor module startup. Each
 // resolution used to run `git config --get lfs.url`, `git config --get remote.origin.url` and
-// `git symbolic-ref --quiet HEAD` as three separate processes. On BusterBlock (31 submodules) that
+// `git symbolic-ref --quiet HEAD` as three separate processes. On a project with 31 submodules that
 // is 96 serial spawns — measured 2.886 s of blocked editor-boot time, paid twice per boot because
 // the automatic FConnect refreshes the status again. Process creation, not git, was the cost.
 //
@@ -63,7 +63,7 @@ namespace
 	{
 		FGitLink_LfsHttpClient::FRepoFacts Facts;
 		Facts.ConfiguredLfsUrl = FString();  // unset — the normal case; derivation takes over
-		Facts.RemoteOriginUrl  = TEXT("https://github.com/chainkemists/BusterBlock.git");
+		Facts.RemoteOriginUrl  = TEXT("https://example.invalid/org/game.git");
 		Facts.bConfigKnown     = true;
 		Facts.HeadRefName      = TEXT("refs/heads/dev");
 		Facts.bHeadRefKnown    = true;
@@ -84,7 +84,7 @@ bool FGitLinkTests_LfsEndpoint_FactsPathNeedsNoSubprocess::RunTest(const FString
 	FGitLink_Subprocess    Subprocess{k_UnrunnableGitBinary, FPaths::ProjectDir()};
 	FGitLink_LfsHttpClient Client{Subprocess};
 
-	const FString Root = TEXT("D:/Repos/BusterBlock/");
+	const FString Root = TEXT("D:/Repos/Game/");
 
 	TestTrue(TEXT("resolved from supplied facts"),
 		Client.Resolve_LfsUrlForRepo(Root, Make_FullFacts()));
@@ -117,7 +117,7 @@ bool FGitLinkTests_LfsEndpoint_NoFactsFallsBackToSubprocess::RunTest(const FStri
 	FGitLink_Subprocess    Subprocess{k_UnrunnableGitBinary, FPaths::ProjectDir()};
 	FGitLink_LfsHttpClient Client{Subprocess};
 
-	const FString Root = TEXT("D:/Repos/BusterBlock/");
+	const FString Root = TEXT("D:/Repos/Game/");
 
 	TestFalse(TEXT("cannot resolve without facts when git will not run"),
 		Client.Resolve_LfsUrlForRepo(Root));
@@ -197,12 +197,12 @@ bool FGitLinkTests_LfsEndpoint_DetachedHeadDoesNotProbe::RunTest(const FString& 
 	FGitLink_LfsHttpClient Client{Subprocess};
 
 	FGitLink_LfsHttpClient::FRepoFacts Facts;
-	Facts.RemoteOriginUrl  = TEXT("https://github.com/chainkemists/CkTests.git");
+	Facts.RemoteOriginUrl  = TEXT("https://example.invalid/org/someplugin.git");
 	Facts.bConfigKnown     = true;
 	Facts.HeadRefName      = FString();   // detached: a legitimately empty answer
 	Facts.bHeadRefKnown    = true;
 
-	const FString Root = TEXT("D:/Repos/BusterBlock/Plugins/CkTests/");
+	const FString Root = TEXT("D:/Repos/Game/Plugins/SomePlugin/");
 
 	TestTrue(TEXT("resolves with a detached HEAD"), Client.Resolve_LfsUrlForRepo(Root, Facts));
 	TestTrue(TEXT("endpoint cached"), Client.Has_LfsUrl(Root));
