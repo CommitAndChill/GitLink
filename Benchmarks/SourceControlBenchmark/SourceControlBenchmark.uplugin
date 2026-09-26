@@ -1,0 +1,21 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Source Control Benchmark",
+	"Description": "Provider-agnostic timing of common source control operations (connect, status, mark for add, revert). Used to produce GitLink's published benchmark numbers; works with any ISourceControlProvider.",
+	"Category": "Source Control",
+	"CreatedBy": "GitLink contributors",
+	"DocsURL": "https://github.com/CommitAndChill/GitLink/blob/main/Docs/BENCHMARKS.md",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"EnabledByDefault": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "SourceControlBenchmark",
+			"Type": "UncookedOnly",
+			"LoadingPhase": "Default"
+		}
+	]
+}
