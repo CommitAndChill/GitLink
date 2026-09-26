@@ -15,10 +15,15 @@
 // The persistence layer + the FMoveToChangelist / FNewChangelist / FDeleteChangelist /
 // FEditChangelist operations land with GitLink_Changelists_Store.
 //
-// Named changelists are NOT supported yet: New/Delete/Edit fail with a clear message instead of
-// reporting success while doing nothing, and CanExecuteOperation reports them unavailable. The
-// static "Working" and "Staged" changelists (declared in GitLink_Changelist.cpp) are the only
-// ones the editor sees; moving files between those two stages/unstages them.
+// Named changelists are NOT supported yet: New/Delete fail with a clear message instead of reporting
+// success while doing nothing, and CanExecuteOperation reports them unavailable. The static "Working"
+// and "Staged" changelists (declared in GitLink_Changelist.cpp) are the only ones the editor sees;
+// moving files between those two stages/unstages them.
+//
+// Edit is different: the engine's View Changes window calls FEditChangelist on Working/Staged itself —
+// from the submit window's Save button and after a failed submit whose description was edited
+// (SSourceControlChangelists.cpp, EditChangelistDescription). Failing there would show an error on a
+// normal workflow, so Edit succeeds; the description is simply not persisted.
 // --------------------------------------------------------------------------------------------------------------------
 
 namespace gitlink::cmd
@@ -53,8 +58,9 @@ namespace gitlink::cmd
 		const FSourceControlOperationRef& /*InOperation*/,
 		const TArray<FString>&            /*InFiles*/) -> FCommandResult
 	{
-		return FCommandResult::Fail(LOCTEXT("EditChangelistUnsupported",
-			"GitLink does not support named changelists yet. Use the Working and Staged changelists."));
+		// See the header comment: reached from the engine's own submit flow; descriptions are not persisted.
+		UE_LOG(LogGitLink, Verbose, TEXT("Cmd_EditChangelist: changelist descriptions are not persisted"));
+		return FCommandResult::Ok();
 	}
 
 	auto MoveToChangelist(
