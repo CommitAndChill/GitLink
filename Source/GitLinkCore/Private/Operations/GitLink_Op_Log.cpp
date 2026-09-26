@@ -115,6 +115,10 @@ namespace gitlink::op
 		int32 PushRc;
 		if (InQuery.StartRef.IsEmpty())
 		{
+			// A branch with no commits yet (fresh `git init`) has no history — an empty answer, not a failure.
+			if (git_repository_head_unborn(Raw) == 1)
+			{ return Out; }
+
 			PushRc = git_revwalk_push_head(Walk.Get());
 		}
 		else
