@@ -1,5 +1,7 @@
 #include "GitLink_Menu.h"
 
+#include "Commands/Cmd_Push.h"
+
 #include "GitLink_Module.h"
 #include "GitLink/GitLink_Provider.h"
 #include "GitLink/GitLink_Version.h"
@@ -204,7 +206,7 @@ auto FGitLink_Menu::Push_Clicked() -> void
 
 	UE_LOG(LogGitLink, Log, TEXT("GitLink_Menu: Push clicked"));
 
-	// Run git push via subprocess on a background thread — libgit2 push lacks credential wiring.
+	// Run git push via subprocess on a background thread (see Cmd_Push.h for why not libgit2).
 	//
 	// LIFETIME NOTE: these lambdas capture `this` raw, and _Menu is a TUniquePtr the provider
 	// Reset()s in Close() — a push can take many seconds, so `this` may be dangling by the time
@@ -219,22 +221,19 @@ auto FGitLink_Menu::Push_Clicked() -> void
 		// Bounded run: a wedged credential helper or dead remote must not pin this worker (and
 		// the "Pushing..." notification) forever. 10 minutes accommodates large LFS pushes.
 		TSharedPtr<FGitLink_Subprocess> Subprocess = FGitLinkModule::Get().Get_Provider().Get_Subprocess();
-		const bool bOk = Subprocess.IsValid() && Subprocess->IsValid()
-			&& Subprocess->Run_Bounded({ TEXT("push") }, FString(), /*InTimeoutSec=*/ 600.0).IsSuccess();
+		gitlink::cmd::FPushOutcome Outcome;
+		if (Subprocess.IsValid())
+		{ Outcome = gitlink::cmd::Push(*Subprocess); }
+		else
+		{ Outcome.ErrorMessage = TEXT("the git command-line tool was not found"); }
 
-		AsyncTask(ENamedThreads::GameThread, [this, bOk]()
+		AsyncTask(ENamedThreads::GameThread, [this, Outcome]()
 		{
 			Remove_InProgressNotification();
-			if (bOk)
-			{
-				UE_LOG(LogGitLink, Log, TEXT("GitLink_Menu: Push succeeded"));
-				Display_SuccessNotification(TEXT("Push"));
-			}
+			if (Outcome.bOk)
+			{ Display_SuccessNotification(TEXT("Push")); }
 			else
-			{
-				UE_LOG(LogGitLink, Warning, TEXT("GitLink_Menu: Push failed"));
-				Display_FailureNotification(TEXT("Push"));
-			}
+			{ Display_FailureNotification(TEXT("Push"), Outcome.ErrorMessage); }
 		});
 	});
 }
@@ -470,11 +469,16 @@ auto FGitLink_Menu::Display_SuccessNotification(const FName& InOpName) -> void
 	FSlateNotificationManager::Get().AddNotification(Info);
 }
 
-auto FGitLink_Menu::Display_FailureNotification(const FName& InOpName) -> void
+auto FGitLink_Menu::Display_FailureNotification(const FName& InOpName, const FString& InDetail) -> void
 {
-	const FText Text = FText::Format(
-		LOCTEXT("Failure", "Error: {0} operation failed!"),
-		FText::FromName(InOpName));
+	// Keep the toast readable: git's output can be long (progress lines precede the error), so show its tail.
+	constexpr int32 MaxDetailChars = 400;
+	const FString Detail = InDetail.TrimStartAndEnd().Right(MaxDetailChars);
+
+	const FText Text = Detail.IsEmpty()
+		? FText::Format(LOCTEXT("Failure", "Error: {0} operation failed!"), FText::FromName(InOpName))
+		: FText::Format(LOCTEXT("FailureDetail", "Error: {0} operation failed:\n{1}"),
+			FText::FromName(InOpName), FText::FromString(Detail));
 
 	FNotificationInfo Info(Text);
 	Info.ExpireDuration = 8.0f;
