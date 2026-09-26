@@ -29,10 +29,9 @@ namespace gitlink::cmd
 				"GitLink: cannot sync — repository not open."));
 		}
 
-		UE_LOG(LogGitLink, Log, TEXT("Cmd_Sync: pulling from 'origin' (fast-forward)"));
+		UE_LOG(LogGitLink, Log, TEXT("Cmd_Sync: pulling from the tracked remote (fast-forward)"));
 
-		gitlink::FFetchParams Params;
-		Params.RemoteName = TEXT("origin");
+		const gitlink::FFetchParams Params;  // empty RemoteName = the branch's tracked remote
 
 		const FResult PullRes = InCtx.Repository->PullFastForward(Params, /*InProgress=*/ nullptr);
 		if (!PullRes)
@@ -74,7 +73,7 @@ namespace gitlink::cmd
 		// state deltas come through.
 		FCommandResult Result = FCommandResult::Ok();
 		Result.InfoMessages.Add(LOCTEXT("SyncOk",
-			"Pulled from 'origin' (fast-forward)."));
+			"Pulled from the tracked remote (fast-forward)."));
 		return Result;
 	}
 }
