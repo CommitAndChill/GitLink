@@ -1,4 +1,5 @@
 #include "Cmd_Shared.h"
+#include "GitLink/GitLink_Settings.h"
 #include "GitLink_CommandDispatcher.h"
 #include "GitLinkLog.h"
 
@@ -29,6 +30,8 @@ namespace gitlink::cmd
 
 		gitlink::FFetchParams Params;  // empty RemoteName = the branch's tracked remote
 		Params.Credentials = Make_GitCredentialProvider(InCtx.Subprocess);
+		if (const UGitLink_Settings* Settings = GetDefault<UGitLink_Settings>())
+		{ Params.bAllowDefaultCredentials = Settings->bAllowWindowsIntegratedAuth; }
 
 		const FResult FetchRes = InCtx.Repository->Fetch(Params, /*InProgress=*/ nullptr);
 		if (!FetchRes)
