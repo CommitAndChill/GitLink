@@ -64,6 +64,37 @@ namespace gitlink::lfs_http
 		// non-numeric string. Returns 0 for empty/whitespace input — caller treats this
 		// as "no Retry-After header was present".
 		GITLINK_API auto Parse_RetryAfterSeconds(const FString& InHeaderValue, int32 InDefaultSec) -> int32;
+
+		// Outcome of Execute_BlockingRequest. bCompleted is false when no answer arrived at all
+		// (engine exit, ProcessRequest refused, or the wait backstop expired); every other field
+		// is meaningful only when it is true.
+		struct FBlockingHttpResult
+		{
+			bool    bCompleted = false;
+			bool    bSuccess   = false;   // transport succeeded and a response exists
+			int32   HttpStatus = -1;
+			FString ResponseBody;
+			FString RateLimitRemaining;   // X-RateLimit-Remaining header (empty if absent)
+			FString RetryAfter;           // Retry-After header (empty if absent)
+		};
+
+		// Issues one HTTP request and blocks the calling thread until it completes or times out.
+		// The ONLY way the LFS client talks HTTP — every request site goes through here so the
+		// delegate thread policy below cannot be forgotten at a new one.
+		//
+		// Completion is delivered on the HTTP thread (CompleteOnHttpThread), not UE's default game
+		// thread. A default-policy request only reaches Finished when the game thread ticks
+		// FHttpManager, so a caller blocked on it while the game thread is busy — the editor's
+		// first frame, where the startup Connect sweep runs — gets a guaranteed timeout however
+		// fast the server answered. Same pattern as the engine's own
+		// FHttpRequestCommon::ProcessRequestUntilComplete. Safe to call from any thread,
+		// including the game thread itself.
+		GITLINK_API auto Execute_BlockingRequest(
+			const FString&                        InVerb,
+			const FString&                        InUrl,
+			const TArray<TPair<FString, FString>>& InHeaders,
+			const FString&                        InBody,
+			float                                 InTimeoutSec) -> FBlockingHttpResult;
 	}
 }
 
@@ -82,8 +113,9 @@ namespace gitlink::lfs_http
 // Thread-safety: all public methods are safe to call from the bounded-parallel worker pool used
 // by Cmd_UpdateStatus / Cmd_Connect. The credential cache is guarded by a critical section.
 // HTTP requests are launched from worker threads; UE's HTTP module is thread-safe for
-// AddRequest. Completion delegates fire on the game thread (which keeps ticking during the
-// poll), so the worker waits on an FEvent until completion or a 10 s timeout.
+// AddRequest. Completion delegates fire on the HTTP thread (see detail::Execute_BlockingRequest),
+// so the worker waits on an FEvent until completion or a 10 s timeout without depending on the
+// game thread ticking — it does not tick during the editor's first frame.
 // --------------------------------------------------------------------------------------------------------------------
 
 // GITLINK_API is required so the test module (GitLinkTests) can construct and call into this
