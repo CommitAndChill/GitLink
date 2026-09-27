@@ -4,6 +4,15 @@ All notable changes to GitLink. Versions follow [Semantic Versioning](https://se
 beta (`0.x`): a minor bump can change behaviour. Engineering detail for each version — root causes, measurements and
 test notes — is kept in the version log in [CLAUDE.md](CLAUDE.md).
 
+## [0.8.0] — unreleased
+
+### Fixed
+- **Editor startup no longer stalls on LFS lock checks.** Every lock query waited for a reply that only the game
+  thread could deliver, so the checks run by the startup connection — which happen before the editor draws its first
+  frame — each timed out after 10 seconds however fast the server answered (`LogHttp: HTTP request timed out after
+  10.00 seconds ... /info/lfs/locks/verify`), and then repeated the query through `git lfs`. Replies are now
+  delivered on the HTTP thread, so lock state arrives in the time the server takes to answer.
+
 ## [0.7.0] — unreleased
 
 ### Fixed

@@ -7,11 +7,9 @@
 #include "GitLinkCore/Repository/GitLink_Repository_Params.h"
 #include "GitLinkCore/Types/GitLink_Types.h"
 
-#include <Async/Async.h>
 #include <CoreMinimal.h>
 #include <HAL/PlatformMisc.h>
-#include <HttpManager.h>
-#include <HttpModule.h>
+#include <HAL/PlatformProcess.h>
 #include <Misc/AutomationTest.h>
 #include <Misc/ScopeExit.h>
 
@@ -36,24 +34,6 @@ namespace
 		if (Url.IsEmpty())
 		{ InTest.AddInfo(TEXT("GITLINK_LIVE_REMOTE not set — live remote test skipped")); }
 		return Url;
-	}
-
-	// FGitLink_LfsHttpClient blocks its calling thread until the HTTP completion delegate fires, and that delegate
-	// is delivered on the game thread — which is where automation tests run. So run the call on a worker and tick
-	// the HTTP manager here until it finishes (the editor gets the same effect from its own tick loop).
-	template <typename TResult>
-	auto Run_PumpingHttp(TFunction<TResult()> InCall, double InTimeoutSec = 30.0) -> TOptional<TResult>
-	{
-		TFuture<TResult> Future = Async(EAsyncExecution::ThreadPool, MoveTemp(InCall));
-		const double Deadline = FPlatformTime::Seconds() + InTimeoutSec;
-		while (!Future.IsReady() && FPlatformTime::Seconds() < Deadline)
-		{
-			FHttpModule::Get().GetHttpManager().Tick(0.01f);
-			FPlatformProcess::Sleep(0.01f);
-		}
-		if (!Future.IsReady())
-		{ return {}; }
-		return Future.Get();
 	}
 }
 
@@ -167,24 +147,18 @@ bool FGitLinkTests_Live_Lfs_LockVerifyUnlock::RunTest(const FString& /*Parameter
 	if (!TestTrue(FString::Printf(TEXT("git lfs lock: %s"), *Locked.Get_CombinedError()), Locked.IsSuccess()))
 	{ return false; }
 
-	// The sweep sees it as ours.
-	const TOptional<FGitLink_Subprocess::FLfsLocksSnapshot> AfterLock = Run_PumpingHttp<FGitLink_Subprocess::FLfsLocksSnapshot>(
-		[&Client, &Clone]() { return Client.Request_LocksVerify(Clone); });
-	if (!TestTrue(TEXT("/locks/verify completed"), AfterLock.IsSet()))
-	{ return false; }
-	TestTrue(TEXT("/locks/verify succeeded (auth + endpoint)"), AfterLock->bSuccess);
-	TestTrue(TEXT("lock is listed"), AfterLock->AllLocks.Contains(RelPath));
-	TestTrue(TEXT("lock is classified as ours"), AfterLock->OursPaths.Contains(RelPath));
+	// The sweep sees it as ours. Called straight from the game thread, which does not tick while it waits: the client
+	// must not depend on it (see GitLink.LfsHttp.BlockingRequest.*).
+	const FGitLink_Subprocess::FLfsLocksSnapshot AfterLock = Client.Request_LocksVerify(Clone);
+	TestTrue(TEXT("/locks/verify succeeded (auth + endpoint)"), AfterLock.bSuccess);
+	TestTrue(TEXT("lock is listed"), AfterLock.AllLocks.Contains(RelPath));
+	TestTrue(TEXT("lock is classified as ours"), AfterLock.OursPaths.Contains(RelPath));
 
 	// The single-file probe (focus / asset-open / pre-checkout path) agrees, using the identity the sweep learned.
-	const TOptional<FGitLink_LfsHttpClient::FSingleFileLockResult> Probe = Run_PumpingHttp<FGitLink_LfsHttpClient::FSingleFileLockResult>(
-		[&Client, &Clone, &RelPath]() { return Client.Request_SingleFileLock(Clone, FPaths::Combine(Clone, RelPath)); });
-	if (TestTrue(TEXT("single-file probe completed"), Probe.IsSet()))
-	{
-		TestTrue(TEXT("single-file probe succeeded"), Probe->bSuccess);
-		TestEqual(TEXT("single-file probe says Locked (ours)"),
-			static_cast<int32>(Probe->Lock), static_cast<int32>(EGitLink_LockState::Locked));
-	}
+	const FGitLink_LfsHttpClient::FSingleFileLockResult Probe = Client.Request_SingleFileLock(Clone, FPaths::Combine(Clone, RelPath));
+	TestTrue(TEXT("single-file probe succeeded"), Probe.bSuccess);
+	TestEqual(TEXT("single-file probe says Locked (ours)"),
+		static_cast<int32>(Probe.Lock), static_cast<int32>(EGitLink_LockState::Locked));
 
 	// Unlock — the Revert / Check In path (no --force: GitLink never forces).
 	const FGitLink_SubprocessResult Unlocked = Git.RunLfs({ TEXT("unlock"), TEXT("--"), RelPath }, Clone);
@@ -194,9 +168,8 @@ bool FGitLinkTests_Live_Lfs_LockVerifyUnlock::RunTest(const FString& /*Parameter
 	bool bReleased = false;
 	for (int32 Attempt = 0; Attempt < 10 && !bReleased; ++Attempt)
 	{
-		const TOptional<FGitLink_Subprocess::FLfsLocksSnapshot> Page = Run_PumpingHttp<FGitLink_Subprocess::FLfsLocksSnapshot>(
-			[&Client, &Clone]() { return Client.Request_LocksVerify(Clone); });
-		bReleased = Page.IsSet() && Page->bSuccess && !Page->AllLocks.Contains(RelPath);
+		const FGitLink_Subprocess::FLfsLocksSnapshot Page = Client.Request_LocksVerify(Clone);
+		bReleased = Page.bSuccess && !Page.AllLocks.Contains(RelPath);
 		if (!bReleased)
 		{ FPlatformProcess::Sleep(1.0f); }
 	}
