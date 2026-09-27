@@ -40,7 +40,6 @@ test notes — is kept in the version log in [CLAUDE.md](CLAUDE.md).
 - Automated coverage for fetch, pull and push against a local remote, hook detection, and first-run edge cases
   (no Git, no commits yet, detached HEAD, non-ASCII paths); opt-in live tests against a real private remote and LFS
   server. See [CONTRIBUTING.md](CONTRIBUTING.md).
-- `Benchmarks/SourceControlBenchmark`, a provider-agnostic benchmark plugin, and [Docs/BENCHMARKS.md](Docs/BENCHMARKS.md).
 
 ## [0.6.0]
 - Faster editor startup on projects with many submodules: LFS endpoint discovery reads Git configuration in-process
