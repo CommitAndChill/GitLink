@@ -26,7 +26,7 @@ GitLink is an editor-native Git provider built for Unreal projects. It brings ev
 - **Keep submodule-heavy projects usable.** Status, history, diff, staging, commits, and LFS operations are routed to the repository that owns each file—including initialized Git submodules.
 - **Stay current automatically.** Background polling refreshes repository and lock state, while saves and editor activity trigger faster updates for the files you are actively using.
 - **Respect repository hooks.** When the repository has `pre-commit` / `commit-msg` hooks (including via `core.hooksPath`), commits go through the Git executable so the hooks run. Push always uses the Git executable.
-- **Fast on big projects.** Status, history and staging run in-process through libgit2 instead of spawning `git` for every query, and lock state is polled over a pooled HTTPS connection. See [Benchmarks](Docs/BENCHMARKS.md).
+- **Built for big projects.** Status, history and staging run in-process through libgit2 instead of spawning `git` for every query, and lock state is polled over a pooled HTTPS connection. On a 31-submodule production project this cut provider start-up work from ~2.9 s of blocking process spawns to a negligible in-process read (v0.6.0).
 
 ## Requirements
 
@@ -151,7 +151,6 @@ When reporting a problem, include the GitLink version from the log line `GitLink
 ## Documentation
 
 - [CHANGELOG.md](CHANGELOG.md) — what changed in each version.
-- [Docs/BENCHMARKS.md](Docs/BENCHMARKS.md) — performance compared with the Git LFS 2 and Epic Git plugins, with the method to reproduce it.
 - [ROADMAP.md](ROADMAP.md) — known gaps and planned work.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — building, testing and submitting changes.
 - [SECURITY.md](SECURITY.md) — reporting vulnerabilities and how credentials are handled.

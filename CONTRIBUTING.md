@@ -64,8 +64,3 @@ Test fixtures create repositories under `<Project>/Saved/GitLinkTests/` and dele
   `docs:`, …) and explain *why*.
 - Behaviour changes bump the version (`GITLINK_VERSION` in `Source/GitLink/Public/GitLink/GitLink_Version.h` and
   `VersionName` in `GitLink.uplugin`) and add an entry to [CHANGELOG.md](CHANGELOG.md).
-
-## Benchmarks
-
-`Benchmarks/SourceControlBenchmark` is a separate plugin that times any source control provider through Unreal's
-generic interface. [Docs/BENCHMARKS.md](Docs/BENCHMARKS.md) explains how to run it on your own project.
