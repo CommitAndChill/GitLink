@@ -588,6 +588,11 @@ namespace gitlink::cmd
 			// parallelism that pinned the editor for ~2 minutes at ~85% CPU on the spinning
 			// workers — exactly what was reported in v0.3.0.
 			//
+			// (Since v0.8.0 the completion is delivered on the HTTP thread, so a blocked game
+			// thread no longer starves the probe itself. Blocking the game thread on network
+			// round-trips during a pre-checkout refresh is still wrong, which is why this stays
+			// fire-and-forget.)
+			//
 			// Fix: kick off async refreshes via Provider::Request_LockRefreshForFile (the same
 			// path the editor delegates use — background thread, debounced per-path at 2 s,
 			// cache mutation marshalled back to the game thread). The game thread is never

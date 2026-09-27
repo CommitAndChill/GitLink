@@ -35,7 +35,7 @@ public class GitLinkTests : ModuleRules
 		{
 			"GitLink",
 			"SourceControl",
-			"HTTP",   // live LFS tests pump FHttpManager while the client waits on a worker thread
+			"Sockets",   // Test_LfsHttpClient_BlockingRequest: raw loopback server that does not tick on the game thread
 		});
 	}
 }

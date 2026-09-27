@@ -42,6 +42,26 @@ namespace
 	constexpr int32  kDefault429BackoffSec     = 60;    // used when Retry-After is missing / non-numeric
 	constexpr int32  kMaxBackoffSec            = 3600;  // cap absurd Retry-After values
 
+	// Surfaces a low rate-limit budget once per process, whichever request path (sweep or single-file
+	// probe) sees it first, so a noisy editor + many submodules can't exhaust the LFS quota silently.
+	// GitHub's LFS bucket is 3000/min authenticated (separate from the 5000/hr REST quota), so we should
+	// virtually never see this — if we do, it's a real signal something is misconfigured.
+	auto Warn_IfRateLimitLow(const FString& InRateLimitRemaining, const FString& InHostKey) -> void
+	{
+		if (InRateLimitRemaining.IsEmpty() || !InRateLimitRemaining.IsNumeric())
+		{ return; }
+
+		static FThreadSafeBool bWarnedLowBudget = false;
+		const int32 Remaining = FCString::Atoi(*InRateLimitRemaining);
+		if (Remaining < kRateLimitWarnThreshold && !bWarnedLowBudget.AtomicSet(true))
+		{
+			UE_LOG(LogGitLink, Warning,
+				TEXT("LfsHttpClient: LFS rate-limit budget low — %d remaining (host '%s'). ")
+				TEXT("If this persists, set r.GitLink.LfsHttp 0 to fall back to subprocess polling."),
+				Remaining, *InHostKey);
+		}
+	}
+
 	// A credential the server rejected twice in a row (the cached one, then a fresh `git credential
 	// fill`) will keep being rejected: the helper hands back the same thing. Back off instead of paying
 	// a helper spawn + two 401s on every sweep and probe. We deliberately do NOT `git credential reject`
@@ -338,6 +358,97 @@ namespace gitlink::lfs_http::detail
 		// our use case since LFS servers in the wild use the integer form.
 		return InDefaultSec;
 	}
+
+	auto Execute_BlockingRequest(
+		const FString&                        InVerb,
+		const FString&                        InUrl,
+		const TArray<TPair<FString, FString>>& InHeaders,
+		const FString&                        InBody,
+		float                                 InTimeoutSec) -> FBlockingHttpResult
+	{
+		// Teardown guard. Callers run on ParallelFor / AsyncTask workers; touching
+		// FHttpModule::Get() once the HTTP module has unloaded during engine exit trips its
+		// game-thread assert and aborts the process off the game thread (v0.3.8 / v0.3.9). This
+		// is the lowest choke point every request passes through.
+		if (IsEngineExitRequested())
+		{ return {}; }
+
+		// Shared completion state — owns the FEvent and is captured by the lambda by shared-ref.
+		// If we time out and return before the delegate fires, the lambda still holds the last
+		// shared-ref and the event survives until the lambda runs. The event is returned to the
+		// pool exactly once, by the destructor. The waiter reads the result fields only after a
+		// signalled Wait, which orders them after the lambda's writes.
+		struct FCompletion
+		{
+			FEvent*             Done = nullptr;
+			FBlockingHttpResult Result;
+
+			~FCompletion()
+			{
+				if (Done != nullptr)
+				{ FPlatformProcess::ReturnSynchEventToPool(Done); }
+			}
+		};
+		const TSharedRef<FCompletion> State = MakeShared<FCompletion>();
+		State->Done = FPlatformProcess::GetSynchEventFromPool(/*bIsManualReset=*/ false);
+
+		const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Req = FHttpModule::Get().CreateRequest();
+		Req->SetURL(InUrl);
+		Req->SetVerb(InVerb);
+		for (const TPair<FString, FString>& Header : InHeaders)
+		{ Req->SetHeader(Header.Key, Header.Value); }
+		Req->SetTimeout(InTimeoutSec);
+		if (!InBody.IsEmpty())
+		{ Req->SetContentAsString(InBody); }
+
+		// Load-bearing: see the header. With the default CompleteOnGameThread policy the request
+		// cannot finish while the game thread is blocked, and the Wait below is a guaranteed
+		// timeout. The lambda touches only State and the response, so it is safe off-thread.
+		Req->SetDelegateThreadPolicy(EHttpRequestDelegateThreadPolicy::CompleteOnHttpThread);
+		Req->OnProcessRequestComplete().BindLambda(
+			[State](FHttpRequestPtr /*InReq*/, FHttpResponsePtr InResp, bool bInSuccess)
+			{
+				FBlockingHttpResult& Result = State->Result;
+				Result.bSuccess = bInSuccess && InResp.IsValid();
+				if (InResp.IsValid())
+				{
+					Result.HttpStatus         = InResp->GetResponseCode();
+					Result.ResponseBody       = InResp->GetContentAsString();
+					Result.RateLimitRemaining = InResp->GetHeader(TEXT("X-RateLimit-Remaining"));
+					Result.RetryAfter         = InResp->GetHeader(TEXT("Retry-After"));
+				}
+				Result.bCompleted = true;
+				State->Done->Trigger();
+			});
+
+		// An early failure off the game thread can complete the request INLINE, inside
+		// ProcessRequest(), on this thread (FHttpRequestCommon::FinishRequestNotInHttpManager). The
+		// lambda has then already triggered the auto-reset event and the Wait below returns at once.
+		if (!Req->ProcessRequest())
+		{
+			UE_LOG(LogGitLink, Verbose,
+				TEXT("LfsHttpClient: ProcessRequest() returned false for '%s'"), *InUrl);
+			return {};
+		}
+
+		// The engine's own total timeout (InTimeoutSec, on the HTTP thread) completes the request
+		// as a failure, which signals us. The extra 2 s is a backstop, not the expected path.
+		if (!State->Done->Wait(FTimespan::FromSeconds(InTimeoutSec + 2.0)))
+		{
+			// Lambda may still fire later — that's fine, the State stays alive via its captured
+			// shared-ref and the event is cleaned up by State's destructor when the lambda exits.
+			// Skip CancelRequest() if engine exit began while we were waiting: it reaches into
+			// FHttpModule::Get(), which may have unloaded by now. Letting the request tear down via
+			// refcount is safe; cancelling into a dead module is what crashes.
+			if (!IsEngineExitRequested())
+			{ Req->CancelRequest(); }
+			UE_LOG(LogGitLink, Verbose,
+				TEXT("LfsHttpClient: timeout waiting for '%s'"), *InUrl);
+			return {};
+		}
+
+		return State->Result;
+	}
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -605,104 +716,36 @@ auto FGitLink_LfsHttpClient::PostVerify_Once(
 
 	const FString FullUrl = InEndpoint.LfsUrl + TEXT("/locks/verify");
 
-	// Shared completion state — owns the FEvent and is captured by the lambda by shared-ref.
-	// If we time out and return before the delegate fires, the lambda still holds the last
-	// shared-ref and the event survives until the lambda runs. The event is returned to the
-	// pool exactly once, by the destructor.
-	struct FCompletion
-	{
-		FEvent*  Done             = nullptr;
-		FString  ResponseBody;
-		FString  RateLimitRemaining;   // X-RateLimit-Remaining header (empty if absent)
-		FString  RetryAfter;            // Retry-After header (empty if absent)
-		int32    HttpStatus       = -1;
-		bool     bSuccess         = false;
-
-		~FCompletion()
-		{
-			if (Done != nullptr)
-			{ FPlatformProcess::ReturnSynchEventToPool(Done); }
-		}
-	};
-	const TSharedRef<FCompletion> State = MakeShared<FCompletion>();
-	State->Done = FPlatformProcess::GetSynchEventFromPool(/*bIsManualReset=*/ false);
-
-	const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Req = FHttpModule::Get().CreateRequest();
-	Req->SetURL(FullUrl);
-	Req->SetVerb(TEXT("POST"));
-	Req->SetHeader(TEXT("Accept"),       TEXT("application/vnd.git-lfs+json"));
-	Req->SetHeader(TEXT("Content-Type"), TEXT("application/vnd.git-lfs+json"));
-	Req->SetHeader(TEXT("Authorization"), InAuthHeader);
-	Req->SetTimeout(kRequestTimeoutSec);
-	Req->SetContentAsString(Body);
-	Req->OnProcessRequestComplete().BindLambda(
-		[State](FHttpRequestPtr /*InReq*/, FHttpResponsePtr InResp, bool bInSuccess)
-		{
-			State->bSuccess = bInSuccess && InResp.IsValid();
-			if (InResp.IsValid())
+	const gitlink::lfs_http::detail::FBlockingHttpResult Response =
+		gitlink::lfs_http::detail::Execute_BlockingRequest(
+			TEXT("POST"),
+			FullUrl,
 			{
-				State->HttpStatus         = InResp->GetResponseCode();
-				State->ResponseBody       = InResp->GetContentAsString();
-				State->RateLimitRemaining = InResp->GetHeader(TEXT("X-RateLimit-Remaining"));
-				State->RetryAfter         = InResp->GetHeader(TEXT("Retry-After"));
-			}
-			State->Done->Trigger();
-		});
+				{ TEXT("Accept"),        TEXT("application/vnd.git-lfs+json") },
+				{ TEXT("Content-Type"),  TEXT("application/vnd.git-lfs+json") },
+				{ TEXT("Authorization"), InAuthHeader },
+			},
+			Body,
+			kRequestTimeoutSec);
+	if (!Response.bCompleted)
+	{ return Out; }
 
-	if (!Req->ProcessRequest())
-	{
-		UE_LOG(LogGitLink, Verbose,
-			TEXT("LfsHttpClient: ProcessRequest() returned false for '%s'"), *FullUrl);
-		return Out;
-	}
+	OutHttpStatus = Response.HttpStatus;
 
-	const bool bSignaled = State->Done->Wait(FTimespan::FromSeconds(kRequestTimeoutSec + 2.0));
-
-	if (!bSignaled)
-	{
-		// Lambda may still fire later — that's fine, the State stays alive via its captured
-		// shared-ref and the event is cleaned up by State's destructor when the lambda exits.
-		// Skip CancelRequest() if engine exit began while we were waiting: it reaches into
-		// FHttpModule::Get(), which may have unloaded by now. Letting the request tear down via
-		// refcount is safe; cancelling into a dead module is what crashes.
-		if (!IsEngineExitRequested())
-		{ Req->CancelRequest(); }
-		UE_LOG(LogGitLink, Verbose,
-			TEXT("LfsHttpClient: timeout waiting for '%s'"), *FullUrl);
-		return Out;
-	}
-
-	OutHttpStatus = State->HttpStatus;
-
-	// Surface low rate-limit budget once per session so a noisy editor + many submodules
-	// can't exhaust the LFS quota silently. GitHub's LFS bucket is 3000/min authenticated
-	// (separate from the 5000/hr REST quota), so we should virtually never see this — if
-	// we do, it's a real signal something is misconfigured.
-	if (!State->RateLimitRemaining.IsEmpty() && State->RateLimitRemaining.IsNumeric())
-	{
-		const int32 Remaining = FCString::Atoi(*State->RateLimitRemaining);
-		static FThreadSafeBool bWarnedLowBudget = false;
-		if (Remaining < kRateLimitWarnThreshold && !bWarnedLowBudget.AtomicSet(true))
-		{
-			UE_LOG(LogGitLink, Warning,
-				TEXT("LfsHttpClient: LFS rate-limit budget low — %d remaining (host '%s'). ")
-				TEXT("If this persists, set r.GitLink.LfsHttp 0 to fall back to subprocess polling."),
-				Remaining, *InEndpoint.HostKey);
-		}
-	}
+	Warn_IfRateLimitLow(Response.RateLimitRemaining, InEndpoint.HostKey);
 
 	OutRetryAfterSec = gitlink::lfs_http::detail::Parse_RetryAfterSeconds(
-		State->RetryAfter, kDefault429BackoffSec);
+		Response.RetryAfter, kDefault429BackoffSec);
 
-	if (!State->bSuccess || State->HttpStatus < 200 || State->HttpStatus >= 300)
+	if (!Response.bSuccess || Response.HttpStatus < 200 || Response.HttpStatus >= 300)
 	{
 		UE_LOG(LogGitLink, Verbose,
 			TEXT("LfsHttpClient: '%s' returned HTTP %d (success=%s)"),
-			*FullUrl, State->HttpStatus, State->bSuccess ? TEXT("true") : TEXT("false"));
+			*FullUrl, Response.HttpStatus, Response.bSuccess ? TEXT("true") : TEXT("false"));
 		return Out;
 	}
 
-	Out = FGitLink_Subprocess::Parse_LfsVerifyJson(State->ResponseBody);
+	Out = FGitLink_Subprocess::Parse_LfsVerifyJson(Response.ResponseBody);
 	return Out;
 }
 
@@ -888,92 +931,35 @@ auto FGitLink_LfsHttpClient::Get_LocksByPath_Once(
 	const FString FullUrl = FString::Printf(TEXT("%s/locks?path=%s"),
 		*InEndpoint.LfsUrl, *EncodedPath);
 
-	struct FCompletion
-	{
-		FEvent*  Done             = nullptr;
-		FString  ResponseBody;
-		FString  RateLimitRemaining;
-		FString  RetryAfter;
-		int32    HttpStatus       = -1;
-		bool     bSuccess         = false;
-
-		~FCompletion()
-		{
-			if (Done != nullptr)
-			{ FPlatformProcess::ReturnSynchEventToPool(Done); }
-		}
-	};
-	const TSharedRef<FCompletion> State = MakeShared<FCompletion>();
-	State->Done = FPlatformProcess::GetSynchEventFromPool(/*bIsManualReset=*/ false);
-
-	const TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Req = FHttpModule::Get().CreateRequest();
-	Req->SetURL(FullUrl);
-	Req->SetVerb(TEXT("GET"));
-	Req->SetHeader(TEXT("Accept"),        TEXT("application/vnd.git-lfs+json"));
-	Req->SetHeader(TEXT("Authorization"), InAuthHeader);
-	Req->SetTimeout(kRequestTimeoutSec);
-	Req->OnProcessRequestComplete().BindLambda(
-		[State](FHttpRequestPtr /*InReq*/, FHttpResponsePtr InResp, bool bInSuccess)
-		{
-			State->bSuccess = bInSuccess && InResp.IsValid();
-			if (InResp.IsValid())
+	const gitlink::lfs_http::detail::FBlockingHttpResult Response =
+		gitlink::lfs_http::detail::Execute_BlockingRequest(
+			TEXT("GET"),
+			FullUrl,
 			{
-				State->HttpStatus         = InResp->GetResponseCode();
-				State->ResponseBody       = InResp->GetContentAsString();
-				State->RateLimitRemaining = InResp->GetHeader(TEXT("X-RateLimit-Remaining"));
-				State->RetryAfter         = InResp->GetHeader(TEXT("Retry-After"));
-			}
-			State->Done->Trigger();
-		});
+				{ TEXT("Accept"),        TEXT("application/vnd.git-lfs+json") },
+				{ TEXT("Authorization"), InAuthHeader },
+			},
+			FString(),
+			kRequestTimeoutSec);
+	if (!Response.bCompleted)
+	{ return Out; }
 
-	if (!Req->ProcessRequest())
-	{
-		UE_LOG(LogGitLink, Verbose,
-			TEXT("LfsHttpClient: ProcessRequest() returned false for '%s'"), *FullUrl);
-		return Out;
-	}
+	OutHttpStatus = Response.HttpStatus;
 
-	const bool bSignaled = State->Done->Wait(FTimespan::FromSeconds(kRequestTimeoutSec + 2.0));
-
-	if (!bSignaled)
-	{
-		// See PostVerify_Once — don't cancel into a possibly-unloaded HTTP module during exit.
-		if (!IsEngineExitRequested())
-		{ Req->CancelRequest(); }
-		UE_LOG(LogGitLink, Verbose,
-			TEXT("LfsHttpClient: timeout waiting for '%s'"), *FullUrl);
-		return Out;
-	}
-
-	OutHttpStatus = State->HttpStatus;
-
-	// Same one-shot rate-limit warning as the verify path. The static warning flag is per-process,
-	// so a single warning will be emitted regardless of which path tripped it.
-	if (!State->RateLimitRemaining.IsEmpty() && State->RateLimitRemaining.IsNumeric())
-	{
-		const int32 Remaining = FCString::Atoi(*State->RateLimitRemaining);
-		static FThreadSafeBool bWarnedLowBudget = false;
-		if (Remaining < kRateLimitWarnThreshold && !bWarnedLowBudget.AtomicSet(true))
-		{
-			UE_LOG(LogGitLink, Warning,
-				TEXT("LfsHttpClient: LFS rate-limit budget low — %d remaining (host '%s'). ")
-				TEXT("If this persists, set r.GitLink.LfsHttp 0 to fall back to subprocess polling."),
-				Remaining, *InEndpoint.HostKey);
-		}
-	}
+	Warn_IfRateLimitLow(Response.RateLimitRemaining, InEndpoint.HostKey);
 
 	OutRetryAfterSec = gitlink::lfs_http::detail::Parse_RetryAfterSeconds(
-		State->RetryAfter, kDefault429BackoffSec);
+		Response.RetryAfter, kDefault429BackoffSec);
 
-	if (!State->bSuccess || State->HttpStatus < 200 || State->HttpStatus >= 300)
+	if (!Response.bSuccess || Response.HttpStatus < 200 || Response.HttpStatus >= 300)
 	{
 		UE_LOG(LogGitLink, Verbose,
 			TEXT("LfsHttpClient: '%s' returned HTTP %d (success=%s)"),
-			*FullUrl, State->HttpStatus, State->bSuccess ? TEXT("true") : TEXT("false"));
+			*FullUrl, Response.HttpStatus, Response.bSuccess ? TEXT("true") : TEXT("false"));
 		return Out;
 	}
 
-	Out = FGitLink_Subprocess::Parse_LocksByPathJson(State->ResponseBody);
+	Out = FGitLink_Subprocess::Parse_LocksByPathJson(Response.ResponseBody);
 	return Out;
 }
 
