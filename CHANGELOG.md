@@ -4,7 +4,7 @@ All notable changes to GitLink. Versions follow [Semantic Versioning](https://se
 beta (`0.x`): a minor bump can change behaviour. Engineering detail for each version — root causes, measurements and
 test notes — is kept in the version log in [CLAUDE.md](CLAUDE.md).
 
-## [0.8.0] — unreleased
+## [0.8.0] — 2026-09-28
 
 ### Fixed
 - **Editor startup no longer stalls on LFS lock checks.** Every lock query waited for a reply that only the game
@@ -13,7 +13,7 @@ test notes — is kept in the version log in [CLAUDE.md](CLAUDE.md).
   10.00 seconds ... /info/lfs/locks/verify`), and then repeated the query through `git lfs`. Replies are now
   delivered on the HTTP thread, so lock state arrives in the time the server takes to answer.
 
-## [0.7.0] — unreleased
+## [0.7.0] — 2026-09-28
 
 ### Fixed
 - **Pull, Fetch and the background fetch now work with private HTTPS remotes.** They previously sent no credential
