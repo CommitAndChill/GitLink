@@ -4,6 +4,19 @@ All notable changes to GitLink. Versions follow [Semantic Versioning](https://se
 beta (`0.x`): a minor bump can change behaviour. Engineering detail for each version — root causes, measurements and
 test notes — is kept in the version log in [CLAUDE.md](CLAUDE.md).
 
+## [0.8.1] — unreleased
+
+### Fixed
+- **No longer requires UE 5.7 just to compile the provider.** `GetStateBranchAtIndex` was overridden
+  unconditionally, but the method only exists from UE 5.7, so the provider could not compile on earlier engines. The
+  override is now limited to 5.7 and later. This removes one known build error on older engines; they are still not
+  built or tested.
+
+### Documentation
+- The README no longer claims compatibility back to UE 5.1. Only UE 5.7 is built and tested.
+- New `NOTICE.md` lists the bundled libgit2 v1.9.0 binaries with their license, the exact upstream source commit and
+  the build configuration.
+
 ## [0.8.0] — 2026-09-28
 
 ### Fixed
