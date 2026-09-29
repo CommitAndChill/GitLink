@@ -4,7 +4,7 @@ All notable changes to GitLink. Versions follow [Semantic Versioning](https://se
 beta (`0.x`): a minor bump can change behaviour. Engineering detail for each version — root causes, measurements and
 test notes — is kept in the version log in [CLAUDE.md](CLAUDE.md).
 
-## [0.8.1] — unreleased
+## [0.8.1] — 2026-09-28
 
 ### Fixed
 - **No longer requires UE 5.7 just to compile the provider.** `GetStateBranchAtIndex` was overridden
