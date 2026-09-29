@@ -32,7 +32,7 @@ GitLink is an editor-native Git provider built for Unreal projects. It brings ev
 
 | Requirement | Why it is needed |
 |---|---|
-| Unreal Engine 5 project with C++ build support | GitLink is a source plugin and must be compiled for your editor build. Developed and tested on **UE 5.7**; the code keeps compatibility guards back to 5.1, but earlier versions are not regularly built. |
+| Unreal Engine 5 project with C++ build support | GitLink is a source plugin and must be compiled for your editor build. Built and tested on **UE 5.7** only. The code carries version guards for some older engine APIs, but no earlier version is built, so treat 5.6 and older as unsupported. |
 | Windows 64-bit | The included libgit2 v1.9.0 binaries currently target Win64. |
 | Git available on `PATH` | Used for filter-aware staging, push, hooked commits, and to read credentials from your credential helper. |
 | Git LFS available on `PATH` | Required for LFS locking and correct handling of LFS-managed files. |
@@ -168,4 +168,5 @@ GitLink is split into two primary modules:
 
 ## License
 
-See [LICENSE.md](LICENSE.md) for the terms that apply to this project.
+See [LICENSE.md](LICENSE.md) for the terms that apply to this project. Bundled third-party software (libgit2)
+keeps its own license; see [NOTICE.md](NOTICE.md).
