@@ -1329,10 +1329,12 @@ auto FGitLink_Provider::GetStateBranchIndex(const FString& /*InBranchName*/) con
 	return INDEX_NONE;
 }
 
+#if !UE_VERSION_OLDER_THAN(5, 7, 0)
 auto FGitLink_Provider::GetStateBranchAtIndex(int32 /*InBranchIndex*/, FString& /*OutBranchName*/) const -> bool
 {
 	return false;
 }
+#endif
 
 // --------------------------------------------------------------------------------------------------------------------
 // Tick / labels / changelists / settings widget
