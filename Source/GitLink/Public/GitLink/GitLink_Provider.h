@@ -91,7 +91,9 @@ public:
 	auto QueryStateBranchConfig(const FString& InConfigSrc, const FString& InConfigDest) -> bool override;
 	auto RegisterStateBranches(const TArray<FString>& InBranchNames, const FString& InContentRootIn) -> void override;
 	auto GetStateBranchIndex(const FString& InBranchName) const -> int32 override;
+#if !UE_VERSION_OLDER_THAN(5, 7, 0)
 	auto GetStateBranchAtIndex(int32 InBranchIndex, FString& OutBranchName) const -> bool override;
+#endif
 
 	auto GetState(
 		const TArray<FString>& InFiles,
