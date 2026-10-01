@@ -4,6 +4,12 @@ All notable changes to GitLink. Versions follow [Semantic Versioning](https://se
 beta (`0.x`): a minor bump can change behaviour. Engineering detail for each version — root causes, measurements and
 test notes — is kept in the version log in [CLAUDE.md](CLAUDE.md).
 
+## [0.8.2] — 2026-10-01
+
+### Maintenance
+- Prepare public contributor identities and consolidate related documentation history.
+- Replace the internal lock-user name in the file-state predicate fixture; its behavior and assertions are unchanged.
+
 ## [0.8.1] — unreleased
 
 ### Fixed
