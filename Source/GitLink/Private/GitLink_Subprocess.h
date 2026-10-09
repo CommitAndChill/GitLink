@@ -7,8 +7,9 @@
 // In v1 this is primarily git-lfs locking; future use cases are pre-commit hook invocation
 // and `git check-attr` queries.
 //
-// Built on FPlatformProcess::ExecProcess which blocks, captures stdout/stderr, and returns
-// the exit code. Individual args are quoted for paths with spaces.
+// Run() blocks until the child exits, captures stdout and stderr separately, and returns the
+// exit code. It waits by sleeping, never by spinning. Individual args are quoted for paths
+// with spaces.
 // --------------------------------------------------------------------------------------------------------------------
 
 struct FGitLink_SubprocessResult
@@ -96,7 +97,7 @@ public:
 	//
 	// Use this for network-facing commands (push, pull) where a wedged credential helper, an
 	// interactive prompt, or a dead remote would otherwise block the calling thread forever —
-	// Run() is built on ExecProcess, which has no timeout at all.
+	// Run() waits for as long as the child takes.
 	auto Run_Bounded(const TArray<FString>& InArgs, const FString& InCwdOverride,
 		double InTimeoutSec) -> FGitLink_SubprocessResult;
 
@@ -125,6 +126,11 @@ public:
 		// False on subprocess failure / non-zero exit / unparseable JSON. Distinguishes
 		// "no locks" (trustworthy) from "couldn't query" (don't trust empty AllLocks).
 		bool                   bSuccess = false;
+		// HTTP path only: the LFS server answered and refused the query outright (GitHub's 403
+		// "You must have push access to verify locks"). bSuccess stays false, so the cache is
+		// left alone, but the refusal is final: `git lfs locks --verify` sends the same request,
+		// gets the same 403 and prints an empty list, so falling back to it buys nothing.
+		bool                   bRefusedByServer = false;
 		TMap<FString, FString> AllLocks;
 		TSet<FString>          OursPaths;
 	};

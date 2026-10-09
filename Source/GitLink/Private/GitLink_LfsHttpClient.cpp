@@ -359,6 +359,37 @@ namespace gitlink::lfs_http::detail
 		return InDefaultSec;
 	}
 
+	auto Derive_LfsUrlFromRemote(const FString& InHttpRemoteUrl) -> FString
+	{
+		FString Url = InHttpRemoteUrl.TrimStartAndEnd();
+		while (Url.EndsWith(TEXT("/")))
+		{ Url.LeftChopInline(1); }
+
+		if (Url.IsEmpty())
+		{ return FString(); }
+
+		if (!Url.EndsWith(TEXT(".git"), ESearchCase::CaseSensitive))
+		{ Url += TEXT(".git"); }
+
+		return Url + TEXT("/info/lfs");
+	}
+
+	auto Is_VerifyRefusedByServer(
+		int32 InHttpStatus, const FString& InRetryAfter, const FString& InRateLimitRemaining) -> bool
+	{
+		if (InHttpStatus != 403)
+		{ return false; }
+
+		if (!InRetryAfter.TrimStartAndEnd().IsEmpty())
+		{ return false; }
+
+		const FString Remaining = InRateLimitRemaining.TrimStartAndEnd();
+		if (Remaining.IsNumeric() && FCString::Atoi(*Remaining) <= 0)
+		{ return false; }
+
+		return true;
+	}
+
 	auto Execute_BlockingRequest(
 		const FString&                        InVerb,
 		const FString&                        InUrl,
@@ -517,7 +548,7 @@ auto FGitLink_LfsHttpClient::Resolve_LfsUrlForRepo(const FString& InRepoRoot, co
 			return false;
 		}
 
-		LfsUrl = StripTrailingSlash(RemoteUrl) + TEXT("/info/lfs");
+		LfsUrl = gitlink::lfs_http::detail::Derive_LfsUrlFromRemote(RemoteUrl);
 	}
 
 	// Credentials come from `git credential fill` for the host, never from the URL: dropping any
@@ -742,6 +773,8 @@ auto FGitLink_LfsHttpClient::PostVerify_Once(
 		UE_LOG(LogGitLink, Verbose,
 			TEXT("LfsHttpClient: '%s' returned HTTP %d (success=%s)"),
 			*FullUrl, Response.HttpStatus, Response.bSuccess ? TEXT("true") : TEXT("false"));
+		Out.bRefusedByServer = Response.bSuccess && gitlink::lfs_http::detail::Is_VerifyRefusedByServer(
+			Response.HttpStatus, Response.RetryAfter, Response.RateLimitRemaining);
 		return Out;
 	}
 
@@ -802,13 +835,15 @@ auto FGitLink_LfsHttpClient::Request_LocksVerify(const FString& InRepoRoot)
 		FGitLink_Subprocess::FLfsLocksSnapshot Page = PostVerify_Once(
 			Endpoint, AuthHeader, Cursor, HttpStatus, RetryAfterSec);
 
-		if (HttpStatus == 429)
+		// GitHub signals its secondary rate limit as 403 + Retry-After rather than 429. Same
+		// meaning, same response: back the whole host off instead of re-asking per repo.
+		if (HttpStatus == 429 || (HttpStatus == 403 && RetryAfterSec > 0))
 		{
 			const int32 BackoffSec = RetryAfterSec > 0 ? RetryAfterSec : kDefault429BackoffSec;
 			Set_HostBackoff(Endpoint.HostKey, BackoffSec);
 			UE_LOG(LogGitLink, Warning,
-				TEXT("LfsHttpClient: host '%s' returned 429 — backing off %d s"),
-				*Endpoint.HostKey, BackoffSec);
+				TEXT("LfsHttpClient: host '%s' returned %d — backing off %d s"),
+				*Endpoint.HostKey, HttpStatus, BackoffSec);
 			break;
 		}
 
@@ -835,6 +870,7 @@ auto FGitLink_LfsHttpClient::Request_LocksVerify(const FString& InRepoRoot)
 
 		if (!Page.bSuccess)
 		{
+			Out.bRefusedByServer = Page.bRefusedByServer;
 			break;   // transport error or non-2xx — abort accumulation
 		}
 

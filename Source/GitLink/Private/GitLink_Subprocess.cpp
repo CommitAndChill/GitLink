@@ -112,33 +112,118 @@ auto FGitLink_Subprocess::Run(const TArray<FString>& InArgs, const FString& InCw
 		TEXT("Subprocess: %s %s  (cwd=%s)"),
 		*_GitBinary, *ArgsStr, *EffectiveCwd);
 
-	int32   ExitCode = -1;
-	FString StdOut;
-	FString StdErr;
-
 	// Before the spawn, not after, and regardless of outcome — see Get_SpawnAttemptCount.
 	++_SpawnAttempts;
 
-	const bool bSpawned = FPlatformProcess::ExecProcess(
+	// Not FPlatformProcess::ExecProcess: on Windows it waits for the child with
+	// `do { ReadPipes(); Sleep(0); } while (IsProcRunning)`, which pins one core on the calling
+	// thread for the child's whole lifetime. The LFS lock sweep runs its `git lfs locks` fallbacks
+	// 8 at a time on task workers, each child ~1.7 s of network wait — measured ~13 CPU-seconds
+	// per 120 s sweep inside the editor, the periodic CPU spike. The spawn below reproduces
+	// ExecProcess's contract (separate stdout / stderr, no console window, no stdin) with a
+	// sleeping wait instead.
+	void* StdOutRead  = nullptr;
+	void* StdOutWrite = nullptr;
+	void* StdErrRead  = nullptr;
+	void* StdErrWrite = nullptr;
+	if (!FPlatformProcess::CreatePipe(StdOutRead, StdOutWrite)
+		|| !FPlatformProcess::CreatePipe(StdErrRead, StdErrWrite))
+	{
+		// Without its pipes the child would run with nothing to write to and come back as a
+		// "successful" empty answer. ClosePipe tolerates the ends that were never created.
+		FPlatformProcess::ClosePipe(StdOutRead, StdOutWrite);
+		FPlatformProcess::ClosePipe(StdErrRead, StdErrWrite);
+
+		UE_LOG(LogGitLink, Warning,
+			TEXT("Subprocess: failed to spawn '%s %s' (could not create its output pipes)"),
+			*_GitBinary, *ArgsStr);
+		return Result;
+	}
+
+	// Detached + really-hidden is what maps to CREATE_NO_WINDOW (ExecProcess's flag); the
+	// non-detached form allocates a hidden console host per child. The separate stderr pipe is
+	// load-bearing: callers parse StdOut as JSON, and git-lfs writes its warnings to stderr.
+	FProcHandle Proc = FPlatformProcess::CreateProc(
 		*_GitBinary,
 		*ArgsStr,
-		&ExitCode,
-		&StdOut,
-		&StdErr,
-		EffectiveCwd.IsEmpty() ? nullptr : *EffectiveCwd);
+		/*bLaunchDetached=*/ true,
+		/*bLaunchHidden=*/ true,
+		/*bLaunchReallyHidden=*/ true,
+		/*OutProcessID=*/ nullptr,
+		/*InPriority=*/ 0,
+		EffectiveCwd.IsEmpty() ? nullptr : *EffectiveCwd,
+		/*PipeWriteChild=*/ StdOutWrite,
+		/*PipeReadChild=*/ nullptr,
+		/*PipeStdErrChild=*/ StdErrWrite);
 
-	Result.bSpawned = bSpawned;
-	Result.ExitCode = ExitCode;
-	Result.StdOut   = MoveTemp(StdOut);
-	Result.StdErr   = MoveTemp(StdErr);
-
-	if (!bSpawned)
+	if (!Proc.IsValid())
 	{
+		FPlatformProcess::ClosePipe(StdOutRead, StdOutWrite);
+		FPlatformProcess::ClosePipe(StdErrRead, StdErrWrite);
+
 		UE_LOG(LogGitLink, Warning,
 			TEXT("Subprocess: failed to spawn '%s %s'"),
 			*_GitBinary, *ArgsStr);
+		return Result;
 	}
-	else if (ExitCode != 0)
+
+	// Both pipes are drained on every pass: a child blocks once a pipe buffer fills, so reading
+	// only after it exits would deadlock on any output larger than the buffer.
+	TArray<uint8> StdOutBytes;
+	TArray<uint8> StdErrBytes;
+	auto DrainPipes = [&]() -> bool
+	{
+		TArray<uint8> Chunk;
+		const bool bGotOut = FPlatformProcess::ReadPipeToArray(StdOutRead, Chunk) && Chunk.Num() > 0;
+		if (bGotOut)
+		{ StdOutBytes.Append(Chunk); }
+
+		Chunk.Reset();
+		const bool bGotErr = FPlatformProcess::ReadPipeToArray(StdErrRead, Chunk) && Chunk.Num() > 0;
+		if (bGotErr)
+		{ StdErrBytes.Append(Chunk); }
+
+		return bGotOut || bGotErr;
+	};
+
+	// Starts at 1 ms so the short config / version probes Connect runs on the game thread return
+	// promptly, and backs off to 10 ms so a multi-second network child costs next to nothing.
+	// Deliberately no engine-exit bail: a `git add`, a commit or an `lfs lock` in flight must be
+	// allowed to finish, and the sweep already stops starting new children at exit.
+	float SleepSec = 0.001f;
+	while (FPlatformProcess::IsProcRunning(Proc))
+	{
+		DrainPipes();
+		FPlatformProcess::Sleep(SleepSec);
+		SleepSec = FMath::Min(SleepSec * 2.f, 0.01f);
+	}
+	while (DrainPipes())
+	{
+	}
+
+	int32 ExitCode = -1;
+	FPlatformProcess::GetProcReturnCode(Proc, &ExitCode);
+	FPlatformProcess::CloseProc(Proc);
+	FPlatformProcess::ClosePipe(StdOutRead, StdOutWrite);
+	FPlatformProcess::ClosePipe(StdErrRead, StdErrWrite);
+
+	// Convert once, after every byte has arrived: decoding per chunk can split a multi-byte
+	// UTF-8 sequence across two reads.
+	auto ToString = [](TArray<uint8>& InBytes) -> FString
+	{
+		if (InBytes.IsEmpty())
+		{ return FString(); }
+
+		InBytes.Add('\0');
+		return FString(FUTF8ToTCHAR(reinterpret_cast<const ANSICHAR*>(InBytes.GetData())).Get());
+	};
+
+	Result.bSpawned = true;
+	Result.ExitCode = ExitCode;
+	Result.StdOut   = ToString(StdOutBytes);
+	Result.StdErr   = ToString(StdErrBytes);
+
+	if (ExitCode != 0)
 	{
 		// Non-zero exit is not inherently a problem — callers routinely use git's exit code
 		// to detect normal-case "not set / not present" outcomes (e.g. `git config --get

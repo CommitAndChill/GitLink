@@ -420,10 +420,12 @@ namespace gitlink::cmd
 					if (bUseHttp && LfsClient->Has_LfsUrl(RepoRoot))
 					{
 						Snapshots[Idx] = LfsClient->Request_LocksVerify(RepoRoot);
-						if (Snapshots[Idx].bSuccess) { return; }
+						if (!Should_FallBackToLfsSubprocess(Snapshots[Idx])) { return; }
 						// HTTP path failed (transport / 401 / etc.) — fall through to subprocess
 						// for this repo. This keeps a single repo's auth misconfiguration from
-						// poisoning the whole poll cycle.
+						// poisoning the whole poll cycle. A repo the server REFUSED (no push
+						// access) returns above instead: its snapshot stays bSuccess=false, so
+						// it is left out of SuccessfullyPolledRepos and its cache untouched.
 					}
 					Snapshots[Idx] = Subprocess->QueryLfsLocks_Verified(RepoPolls[Idx].Value);
 				});

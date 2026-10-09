@@ -65,6 +65,19 @@ namespace gitlink::lfs_http
 		// as "no Retry-After header was present".
 		GITLINK_API auto Parse_RetryAfterSeconds(const FString& InHeaderValue, int32 InDefaultSec) -> int32;
 
+		// Derives the LFS API root from an http(s) git remote URL the way git-lfs does: append
+		// ".git" unless the URL already ends in it, then "/info/lfs". The ".git" matters — GitHub
+		// answers `<repo>/info/lfs/locks/verify` with 422 for a remote configured without the
+		// suffix, while git-lfs itself (which adds it) gets 200 from the same remote.
+		GITLINK_API auto Derive_LfsUrlFromRemote(const FString& InHttpRemoteUrl) -> FString;
+
+		// True when a `/locks/verify` response is the server's final refusal to answer for this
+		// repo — a 403 that is NOT a rate limit. GitHub sends it to anyone without push access
+		// ("You must have push access to verify locks"). A 403 carrying Retry-After, or with the
+		// rate-limit budget at zero, is throttling and is NOT a refusal: that one is transient.
+		GITLINK_API auto Is_VerifyRefusedByServer(
+			int32 InHttpStatus, const FString& InRetryAfter, const FString& InRateLimitRemaining) -> bool;
+
 		// Outcome of Execute_BlockingRequest. bCompleted is false when no answer arrived at all
 		// (engine exit, ProcessRequest refused, or the wait backstop expired); every other field
 		// is meaningful only when it is true.

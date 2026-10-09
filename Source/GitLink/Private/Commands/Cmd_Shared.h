@@ -76,6 +76,17 @@ namespace gitlink::cmd
 		}
 	}
 
+	// Whether the LFS lock sweep should re-ask through `git lfs locks --verify` after the
+	// in-process HTTP query for a repo came back as InHttpResult. Yes for anything that did not
+	// produce an answer (no endpoint, no credential, transport error, backoff); no once the server
+	// has answered — with locks, or with an outright refusal the CLI would only receive again.
+	// Each fallback is a ~1.7 s child process, so asking when the answer is already known is what
+	// made the sweep expensive on a project with many read-only third-party submodules.
+	inline auto Should_FallBackToLfsSubprocess(const FGitLink_Subprocess::FLfsLocksSnapshot& InHttpResult) -> bool
+	{
+		return !InHttpResult.bSuccess && !InHttpResult.bRefusedByServer;
+	}
+
 	// Make an FGitLink_FileState stamped with the given composite state and current time.
 	inline auto Make_FileState(const FString& InAbsoluteFilename, const FGitLink_CompositeState& InComposite)
 		-> FGitLink_FileStateRef
