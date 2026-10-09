@@ -4,6 +4,21 @@ All notable changes to GitLink. Versions follow [Semantic Versioning](https://se
 beta (`0.x`): a minor bump can change behaviour. Engineering detail for each version — root causes, measurements and
 test notes — is kept in the version log in [CLAUDE.md](CLAUDE.md).
 
+## [0.9.0] — unreleased
+
+### Fixed
+- **The editor no longer spikes the CPU every two minutes.** The background lock sweep started a `git lfs` process
+  for every repository whose server refused the lock query — typically read-only third-party submodules — and the
+  editor then held a full core busy for as long as each of those processes ran. Waiting on git no longer uses CPU,
+  and a refused repository is no longer asked a second time through `git lfs`.
+- A remote configured without the `.git` suffix now resolves to the same LFS endpoint git-lfs uses, instead of one
+  the server rejects.
+
+### Changed
+- When the LFS server refuses the lock query for a repository (HTTP 403 without a rate limit), GitLink keeps the lock
+  states it already has for that repository instead of clearing them.
+- A 403 that carries `Retry-After` is treated as rate limiting and backs off that host, as a 429 does.
+
 ## [0.8.2] — 2026-10-01
 
 ### Maintenance
