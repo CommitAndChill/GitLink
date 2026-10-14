@@ -46,8 +46,10 @@ public class libgit2 : ModuleRules
 				// the provider rather than a module-load crash.
 				PublicDelayLoadDLLs.Add("git2.dll");
 
-				// Ship the DLL next to the editor/target executable.
-				RuntimeDependencies.Add(Path.Combine("$(TargetOutputDir)", "git2.dll"), DllPath);
+				// Beside this module's own binary, not the target executable: in a Shared build
+				// environment $(TargetOutputDir) is the engine's Binaries/Win64. Plugin Binaries
+				// directories are on the DLL search path, so the delay-load resolves from here.
+				RuntimeDependencies.Add(Path.Combine("$(BinaryOutputDir)", "git2.dll"), DllPath);
 
 				// libgit2 built with USE_HTTPS=WinHTTP pulls in these Windows system libs.
 				PublicSystemLibraries.AddRange(new string[] {
