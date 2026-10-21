@@ -15,4 +15,5 @@ public:
 
 private:
 	bool _Libgit2Initialized = false;
+	void* _Libgit2DllHandle = nullptr;
 };

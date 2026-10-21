@@ -43,12 +43,13 @@ public class libgit2 : ModuleRules
 				PublicAdditionalLibraries.Add(LibPath);
 
 				// Delay load so a missing DLL at runtime becomes a graceful disable of
-				// the provider rather than a module-load crash.
+				// the provider rather than a module-load crash. GitLinkCore's StartupModule
+				// loads it by full path before the first libgit2 call.
 				PublicDelayLoadDLLs.Add("git2.dll");
 
 				// Beside this module's own binary, not the target executable: in a Shared build
-				// environment $(TargetOutputDir) is the engine's Binaries/Win64. Plugin Binaries
-				// directories are on the DLL search path, so the delay-load resolves from here.
+				// environment $(TargetOutputDir) is the engine's Binaries/Win64. The delay-load
+				// helper does not search plugin Binaries directories, hence the explicit load.
 				RuntimeDependencies.Add(Path.Combine("$(BinaryOutputDir)", "git2.dll"), DllPath);
 
 				// libgit2 built with USE_HTTPS=WinHTTP pulls in these Windows system libs.

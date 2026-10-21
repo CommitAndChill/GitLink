@@ -2,6 +2,10 @@
 
 #include "GitLinkCoreLog.h"
 
+#include <HAL/PlatformProcess.h>
+#include <Interfaces/IPluginManager.h>
+#include <Misc/Paths.h>
+
 #if WITH_LIBGIT2
 #include <git2.h>
 #endif
@@ -18,6 +22,32 @@ namespace
 auto FGitLinkCoreModule::StartupModule() -> void
 {
 #if WITH_LIBGIT2
+	// git2.dll is delay-loaded and staged beside this module in the plugin's Binaries/<Platform>
+	// (libgit2.Build.cs). The delay-load helper resolves it with the default DLL search, which does not
+	// include plugin Binaries directories, so in a Shared build environment (modules load from the
+	// engine's Binaries) the first libgit2 call below died with 0xc06d007e unless a stray git2.dll sat
+	// beside the editor executable. Load it by full path first: the delay-load then binds to the
+	// already-loaded module, and a missing DLL self-disables the provider instead of crashing.
+	const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("GitLink"));
+	if (!Plugin.IsValid())
+	{
+		UE_LOG(LogGitLinkCore, Error,
+			TEXT("GitLinkCore: plugin 'GitLink' not found; cannot locate git2.dll. GitLink provider will self-disable."));
+		return;
+	}
+
+	const FString DllPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(
+		Plugin->GetBaseDir(), TEXT("Binaries"), FPlatformProcess::GetBinariesSubdirectory(), TEXT("git2.dll")));
+
+	_Libgit2DllHandle = FPlatformProcess::GetDllHandle(*DllPath);
+	if (_Libgit2DllHandle == nullptr)
+	{
+		UE_LOG(LogGitLinkCore, Error,
+			TEXT("GitLinkCore: failed to load %s; GitLink provider will self-disable. Rebuild the editor to restage it."),
+			*DllPath);
+		return;
+	}
+
 	const int32 InitResult = git_libgit2_init();
 	if (InitResult < 0)
 	{
@@ -54,6 +84,12 @@ auto FGitLinkCoreModule::ShutdownModule() -> void
 		_Libgit2Initialized = false;
 		GLibgit2Initialized = false;
 		UE_LOG(LogGitLinkCore, Log, TEXT("GitLinkCore: libgit2 shutdown"));
+	}
+
+	if (_Libgit2DllHandle != nullptr)
+	{
+		FPlatformProcess::FreeDllHandle(_Libgit2DllHandle);
+		_Libgit2DllHandle = nullptr;
 	}
 #endif
 }
