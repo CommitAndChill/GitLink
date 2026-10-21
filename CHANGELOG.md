@@ -4,6 +4,15 @@ All notable changes to GitLink. Versions follow [Semantic Versioning](https://se
 beta (`0.x`): a minor bump can change behaviour. Engineering detail for each version — root causes, measurements and
 test notes — is kept in the version log in [CLAUDE.md](CLAUDE.md).
 
+## [0.9.0] — unreleased
+
+### Fixed
+- **The editor no longer crashes at startup when GitLink's `git2.dll` sits only in the plugin's folder.** Windows did not
+  look in the plugin's `Binaries` folder for `git2.dll`, only beside the editor executable (in the Shared build
+  environment, the engine's). The editor died while loading GitLink (`0xc06d007e`) unless an old copy of the
+  DLL happened to sit beside the engine's editor. GitLink now loads `git2.dll` from its own folder at startup. If
+  the DLL is missing, GitLink logs an error and disables itself instead of crashing.
+
 ## [0.8.2] — 2026-10-01
 
 ### Maintenance
