@@ -1257,6 +1257,7 @@ auto FGitLink_Provider::UsesFileRevisions() const -> bool
 	return true;
 }
 
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
 auto FGitLink_Provider::IsAtLatestRevision() const -> TOptional<bool>
 {
 	return {};
@@ -1276,6 +1277,37 @@ auto FGitLink_Provider::GetNumLocalChanges() const -> TOptional<int>
 			return InState->IsModified() || InState->IsAdded() || InState->IsDeleted();
 		});
 	return Changed.Num();
+}
+#endif
+#endif
+
+#if !UE_VERSION_OLDER_THAN(5, 8, 0)
+auto FGitLink_Provider::UsesSoftRevertOnDelete() const -> bool
+{
+	// Asked by the editor's revert-before-delete paths, which pre-5.8 always ran a hard revert.
+	// Cmd_Revert has no soft mode anyway; Epic's own Git/Perforce/Plastic providers return false.
+	return false;
+}
+
+// 5.8 callers replace `!IsAtLatestRevision()` with `HasChangesToSync()` and `GetNumLocalChanges() > 0`
+// with `HasChangesToCheckIn()` at the same sites, so these keep the pre-5.8 answers.
+auto FGitLink_Provider::HasChangesToSync() const -> TOptional<bool>
+{
+	return {};
+}
+
+auto FGitLink_Provider::HasChangesToCheckIn() const -> TOptional<bool>
+{
+	if (!_bGitRepositoryFound)
+	{ return {}; }
+
+	// Count actual local changes, not cache entries — see the pre-5.8 GetNumLocalChanges.
+	const TArray<FGitLink_FileStateRef> Changed = _StateCache->Enumerate_FileStates(
+		[](const FGitLink_FileStateRef& InState) -> bool
+		{
+			return InState->IsModified() || InState->IsAdded() || InState->IsDeleted();
+		});
+	return Changed.Num() > 0;
 }
 #endif
 
