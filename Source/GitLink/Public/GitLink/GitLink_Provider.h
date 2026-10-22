@@ -141,8 +141,18 @@ public:
 
 #if !UE_VERSION_OLDER_THAN(5, 1, 0)
 	auto UsesFileRevisions  () const -> bool override;
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
 	auto IsAtLatestRevision () const -> TOptional<bool> override;
 	auto GetNumLocalChanges () const -> TOptional<int> override;
+#endif
+#endif
+
+#if !UE_VERSION_OLDER_THAN(5, 8, 0)
+	// 5.8 made IsAtLatestRevision/GetNumLocalChanges final no-ops; the editor now asks these instead
+	// (same call sites: Check In / Sync Latest enablement, the check-in prompt).
+	auto UsesSoftRevertOnDelete() const -> bool override;
+	auto HasChangesToSync      () const -> TOptional<bool> override;
+	auto HasChangesToCheckIn   () const -> TOptional<bool> override;
 #endif
 
 #if !UE_VERSION_OLDER_THAN(5, 2, 0)
