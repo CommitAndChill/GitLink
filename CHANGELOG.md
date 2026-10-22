@@ -4,6 +4,13 @@ All notable changes to GitLink. Versions follow [Semantic Versioning](https://se
 beta (`0.x`): a minor bump can change behaviour. Engineering detail for each version — root causes, measurements and
 test notes — is kept in the version log in [CLAUDE.md](CLAUDE.md).
 
+## [0.10.1] — unreleased
+
+### Fixed
+- **GitLink builds on Unreal Engine 5.8.** 5.8 replaced two revision-control provider functions with new ones;
+  GitLink now implements the new ones and gives the same answers as before, so the Check In and Sync menus behave
+  as they did on 5.7.
+
 ## [0.10.0] — unreleased
 
 ### Fixed
