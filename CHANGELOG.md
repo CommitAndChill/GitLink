@@ -4,6 +4,16 @@ All notable changes to GitLink. Versions follow [Semantic Versioning](https://se
 beta (`0.x`): a minor bump can change behaviour. Engineering detail for each version — root causes, measurements and
 test notes — is kept in the version log in [CLAUDE.md](CLAUDE.md).
 
+## [0.10.0] — unreleased
+
+### Fixed
+- **A missing `git2.dll` in GitLink's plugin folder no longer fails cooks and other commandlets.** 0.9.0 looked for
+  `git2.dll` only in the plugin's `Binaries` folder and logged an error when it was not there, and a commandlet fails
+  on any error. GitLink now looks beside its own module first, then in the plugin's `Binaries` folder, then wherever
+  Windows finds it by name (as before 0.9.0, for example an older copy beside the editor executable). Loading from
+  anywhere but the first location logs a warning that names the file used. If no copy is found, GitLink logs a
+  warning instead of an error and disables itself.
+
 ## [0.9.0] — unreleased
 
 ### Fixed
